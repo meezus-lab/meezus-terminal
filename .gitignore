@@ -1,0 +1,19 @@
+# ─── Python ───────────────────────────────────────────────────────────────
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.Python
+
+# ─── Kronos forecast model ──────────────────────────────────────────────────
+# Auto-cloned + weights auto-downloaded by `python3 forecast_setup.py`.
+# Not committed (nested git repo + large training data); the setup script
+# recreates it from the upstream repo + HuggingFace.
+kronos_src/
+
+# ─── macOS ──────────────────────────────────────────────────────────────────
+.DS_Store
+
+# ─── Local launch agents / logs ─────────────────────────────────────────────
+*.log
+com.meezus.dashboard.plist

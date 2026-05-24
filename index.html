@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Meezus — Market Ops</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/gridstack@10.3.1/dist/gridstack.min.css">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <!-- ─── HEADER ──────────────────────────────────────────────────────────── -->
+  <header class="header">
+    <div class="header-left">
+      <span class="logo">Meezus Terminal</span>
+      <span class="status-dot blink"></span>
+      <span class="status-text">Live</span>
+    </div>
+    <div class="header-center">
+      <div class="quote-box">
+        <span class="quote-text" id="quote-text">&nbsp;</span>
+        <span class="quote-attr" id="quote-attr"></span>
+      </div>
+      <div class="date" id="date">──────────────────</div>
+    </div>
+    <div class="header-right">
+      <div class="header-metric">
+        <span class="h-label">UTC</span>
+        <span class="h-value" id="utc-clock">--:--:--</span>
+      </div>
+      <div class="header-divider"></div>
+      <div class="header-metric">
+        <span class="h-label">BTC Dom</span>
+        <span class="h-value" id="btc-dominance">--%</span>
+      </div>
+      <div class="header-divider"></div>
+      <div class="header-metric">
+        <span class="h-label">Fear &amp; Greed</span>
+        <span class="h-value" id="fear-greed-header">--</span>
+      </div>
+      <div class="header-divider"></div>
+      <button class="reset-btn" id="reset-layout" title="Reset layout to default">Reset</button>
+
+      <!-- ── Layout slots ── -->
+      <div class="layout-menu-wrap" id="layout-menu-wrap">
+        <button class="layout-menu-btn" id="layout-menu-btn" title="Save / restore layouts">
+          Layouts <span class="layout-caret">▾</span>
+        </button>
+        <div class="layout-dropdown" id="layout-dropdown">
+          <div class="layout-dropdown-head">Saved Layouts</div>
+          <div class="layout-slot-list" id="layout-slot-list">
+            <div class="layout-empty-msg">No saved layouts yet.</div>
+          </div>
+          <button class="layout-save-btn" id="layout-save-btn">+ Save Current</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ─── GRID ─────────────────────────────────────────────────────────────── -->
+  <div class="grid-wrapper">
+    <div class="grid-stack" id="dashboard-grid">
+
+      <!-- ── BTC ── -->
+      <div class="grid-stack-item" gs-x="7" gs-y="0" gs-w="2" gs-h="4" gs-id="btc">
+        <div class="grid-stack-item-content">
+          <div class="panel" id="btc-panel">
+            <div class="panel-header">
+              <span class="panel-title">BTC / USDT</span>
+              <span class="panel-tag">PERP</span>
+              <span class="status-dot blink small ml-auto"></span>
+            </div>
+            <div class="panel-body">
+              <div class="panel-price" id="btc-price">──────</div>
+              <div class="panel-change neutral" id="btc-change">── %</div>
+              <div class="panel-metrics">
+                <div class="metric">
+                  <span class="m-label">24h High</span>
+                  <span id="btc-high">──</span>
+                </div>
+                <div class="metric">
+                  <span class="m-label">24h Low</span>
+                  <span id="btc-low">──</span>
+                </div>
+                <div class="metric">
+                  <span class="m-label">Funding</span>
+                  <span id="btc-funding">──</span>
+                </div>
+                <div class="metric">
+                  <span class="m-label">L/S Ratio</span>
+                  <span id="btc-ls">──</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── ETH ── -->
+      <div class="grid-stack-item" gs-x="9" gs-y="0" gs-w="3" gs-h="4" gs-id="eth">
+        <div class="grid-stack-item-content">
+          <div class="panel" id="eth-panel">
+            <div class="panel-header">
+              <span class="panel-title">ETH / USDT</span>
+              <span class="panel-tag">PERP</span>
+              <span class="status-dot blink small ml-auto"></span>
+            </div>
+            <div class="panel-body">
+              <div class="panel-price" id="eth-price">──────</div>
+              <div class="panel-change neutral" id="eth-change">── %</div>
+              <div class="panel-metrics">
+                <div class="metric">
+                  <span class="m-label">24h High</span>
+                  <span id="eth-high">──</span>
+                </div>
+                <div class="metric">
+                  <span class="m-label">24h Low</span>
+                  <span id="eth-low">──</span>
+                </div>
+                <div class="metric">
+                  <span class="m-label">Funding</span>
+                  <span id="eth-funding">──</span>
+                </div>
+                <div class="metric">
+                  <span class="m-label">L/S Ratio</span>
+                  <span id="eth-ls">──</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── FEAR & GREED ── -->
+      <div class="grid-stack-item" gs-x="7" gs-y="6" gs-w="2" gs-h="5" gs-id="feargreed">
+        <div class="grid-stack-item-content">
+          <div class="panel">
+            <div class="panel-header">
+              <span class="panel-title">Fear &amp; Greed</span>
+              <span class="panel-tag">Crypto</span>
+            </div>
+            <div class="panel-body fg-gauge-body">
+              <canvas id="fg-canvas" class="fg-canvas"></canvas>
+              <div class="fg-bottom">
+                <div class="fg-readout">
+                  <span class="fg-now-label">Now</span>
+                  <span class="fg-val-num" id="fg-value">──</span>
+                  <span class="fg-dot">·</span>
+                  <span class="fg-sentiment" id="fg-label">──</span>
+                </div>
+                <div class="fg-scale-row">
+                  <span class="fg-scale-fear">Fear</span>
+                  <span class="fg-scale-mid">Neutral</span>
+                  <span class="fg-scale-greed">Greed</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── SENTIMENT ── -->
+      <div class="grid-stack-item" gs-x="9" gs-y="6" gs-w="3" gs-h="5" gs-id="sentiment">
+        <div class="grid-stack-item-content">
+          <div class="panel">
+            <div class="panel-header">
+              <span class="panel-title">Sentiment Matrix</span>
+            </div>
+            <div class="panel-body no-pad">
+              <div class="sentiment-row">
+                <span class="s-name">VIX</span>
+                <span class="s-val" id="vix-val">──</span>
+                <span class="s-badge neutral" id="vix-badge">──</span>
+              </div>
+              <div class="sentiment-row">
+                <span class="s-name">BTC Dom</span>
+                <span class="s-val" id="dom-val">──</span>
+                <span class="s-badge neutral" id="dom-badge">──</span>
+              </div>
+              <div class="sentiment-row">
+                <span class="s-name">BTC L/S</span>
+                <span class="s-val" id="btc-ls-val">──</span>
+                <span class="s-badge neutral" id="btc-ls-badge">──</span>
+              </div>
+              <div class="sentiment-row">
+                <span class="s-name">ETH L/S</span>
+                <span class="s-val" id="eth-ls-val">──</span>
+                <span class="s-badge neutral" id="eth-ls-badge">──</span>
+              </div>
+              <div class="sentiment-row">
+                <span class="s-name">BTC Funding</span>
+                <span class="s-val" id="btc-fund-val">──</span>
+                <span class="s-badge neutral" id="btc-fund-badge">──</span>
+              </div>
+              <div class="sentiment-row">
+                <span class="s-name">ETH Funding</span>
+                <span class="s-val" id="eth-fund-val">──</span>
+                <span class="s-badge neutral" id="eth-fund-badge">──</span>
+              </div>
+              <div class="sentiment-row">
+                <span class="s-name">Put/Call</span>
+                <span class="s-val" id="pc-val">──</span>
+                <span class="s-badge neutral" id="pc-badge">──</span>
+              </div>
+            </div>
+
+            <!-- ── AI Signal block ── -->
+            <div class="sent-ai-bar">
+              <div class="sent-ai-head">
+                <span class="sent-ai-lbl">AI Signal</span>
+                <span class="sent-ai-regime neutral" id="sent-ai-regime">──</span>
+              </div>
+              <div class="sent-ai-text" id="sent-ai-text">Analysing market conditions…</div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      <!-- ── LIQUIDATION HEATMAP (native) ── -->
+      <div class="grid-stack-item" gs-x="7" gs-y="14" gs-w="5" gs-h="7" gs-id="heatmap">
+        <div class="grid-stack-item-content">
+          <div class="panel">
+            <div class="panel-header">
+              <span class="panel-title">Liquidation Heatmap</span>
+              <span class="hm-liq-dot off" id="hm-liq-dot" title="Liquidation feed disconnected"></span>
+              <span class="hm-liq-ticker" id="hm-liq-ticker"></span>
+              <div class="tf-group" id="hm-tf-group">
+                <button class="tf-btn" data-tf="1m"  onclick="setHeatmapTF('1m')">1m</button>
+                <button class="tf-btn" data-tf="15m" onclick="setHeatmapTF('15m')">15m</button>
+                <button class="tf-btn active" data-tf="1h" onclick="setHeatmapTF('1h')">1h</button>
+                <button class="tf-btn" data-tf="4h"  onclick="setHeatmapTF('4h')">4h</button>
+                <button class="tf-btn" data-tf="1d"  onclick="setHeatmapTF('1d')">1d</button>
+              </div>
+              <div class="heatmap-toggle">
+                <button class="hm-btn active" id="hm-btc" onclick="setHeatmapCoin('BTC')">BTC</button>
+                <button class="hm-btn"        id="hm-eth" onclick="setHeatmapCoin('ETH')">ETH</button>
+              </div>
+            </div>
+            <div class="panel-body no-pad heatmap-body">
+              <div class="heatmap-canvas-wrap">
+                <canvas id="heatmap-canvas" class="heatmap-canvas"></canvas>
+                <canvas id="heatmap-cursor-canvas" class="heatmap-cursor"></canvas>
+              </div>
+              <div class="hm-controls">
+                <div class="hm-ctrl-group">
+                  <span class="hm-ctrl-lbl">Range</span>
+                  <button class="hm-range-btn"        data-pct="1"  onclick="setHeatmapRange(1)">±1%</button>
+                  <button class="hm-range-btn"        data-pct="2"  onclick="setHeatmapRange(2)">±2%</button>
+                  <button class="hm-range-btn active" data-pct="5"  onclick="setHeatmapRange(5)">±5%</button>
+                  <button class="hm-range-btn"        data-pct="10" onclick="setHeatmapRange(10)">±10%</button>
+                  <button class="hm-range-btn"        data-pct="20" onclick="setHeatmapRange(20)">±20%</button>
+                </div>
+                <div class="hm-ctrl-group">
+                  <span class="hm-ctrl-lbl">Show</span>
+                  <button class="hm-mode-btn active" data-mode="unswept" onclick="setHeatmapMode('unswept')">Untaken</button>
+                  <button class="hm-mode-btn"        data-mode="all"     onclick="setHeatmapMode('all')">All</button>
+                </div>
+                <div class="hm-ctrl-group">
+                  <span class="hm-ctrl-lbl">Sensitivity</span>
+                  <div class="hm-sens" id="hm-sens">
+                    <button class="hm-sens-dot" data-v="1" onclick="setHeatmapSens(1)"></button>
+                    <button class="hm-sens-dot" data-v="2" onclick="setHeatmapSens(2)"></button>
+                    <button class="hm-sens-dot active" data-v="3" onclick="setHeatmapSens(3)"></button>
+                    <button class="hm-sens-dot" data-v="4" onclick="setHeatmapSens(4)"></button>
+                    <button class="hm-sens-dot" data-v="5" onclick="setHeatmapSens(5)"></button>
+                  </div>
+                </div>
+                <div class="hm-ctrl-group">
+                  <span class="hm-ctrl-lbl">Min Lev</span>
+                  <button class="hm-lev-btn active" data-lev="25"  onclick="setHeatmapMinLev(25)">25x</button>
+                  <button class="hm-lev-btn"        data-lev="50"  onclick="setHeatmapMinLev(50)">50x</button>
+                  <button class="hm-lev-btn"        data-lev="100" onclick="setHeatmapMinLev(100)">100x</button>
+                </div>
+                <div class="hm-ctrl-group">
+                  <span class="hm-ctrl-lbl">Live Liqs</span>
+                  <button class="hm-liq-btn active" data-on="true"  onclick="setHeatmapShowLiq(true)">On</button>
+                  <button class="hm-liq-btn"        data-on="false" onclick="setHeatmapShowLiq(false)">Off</button>
+                </div>
+                <button class="hm-reset-btn" id="hm-reset-view" onclick="setHeatmapResetView()" style="display:none">Reset view</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── CRYPTO PULSE (social sentiment) ── -->
+      <div class="grid-stack-item" gs-x="0" gs-y="44" gs-w="12" gs-h="4" gs-id="pulse">
+        <div class="grid-stack-item-content">
+          <div class="panel">
+            <div class="panel-header">
+              <span class="panel-title">Crypto Pulse</span>
+              <span class="panel-tag">Social Sentiment</span>
+              <span class="pulse-meta" id="pulse-meta"></span>
+            </div>
+            <div class="panel-body no-pad pulse-body">
+              <div class="pulse-left">
+                <div class="pulse-score-row">
+                  <div class="pulse-score" id="pulse-score">··</div>
+                  <div class="pulse-label-block">
+                    <div class="pulse-label" id="pulse-label">Loading…</div>
+                    <div class="pulse-stats" id="pulse-stats">—</div>
+                  </div>
+                </div>
+                <div class="pulse-bar">
+                  <div class="pulse-bar-track">
+                    <div class="pulse-bar-mid"></div>
+                    <div class="pulse-bar-fill" id="pulse-bar-fill"></div>
+                    <div class="pulse-bar-needle" id="pulse-bar-needle"></div>
+                  </div>
+                  <div class="pulse-bar-scale">
+                    <span class="pulse-bar-end neg">−100</span>
+                    <span class="pulse-bar-zero">0</span>
+                    <span class="pulse-bar-end pos">+100</span>
+                  </div>
+                </div>
+              </div>
+              <div class="pulse-right">
+                <div class="pulse-col">
+                  <div class="pulse-col-head pos">▲ Most Bullish</div>
+                  <div class="pulse-col-list" id="pulse-bull-list"></div>
+                </div>
+                <div class="pulse-col">
+                  <div class="pulse-col-head neg">▼ Most Bearish</div>
+                  <div class="pulse-col-list" id="pulse-bear-list"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── TradFi ── -->
+      <div class="grid-stack-item" gs-x="7" gs-y="11" gs-w="5" gs-h="3" gs-id="tradfi">
+        <div class="grid-stack-item-content">
+          <div class="panel">
+            <div class="panel-header">
+              <span class="panel-title">TradFi</span>
+              <span class="panel-tag">Binance Perp · USDT</span>
+              <span class="tradfi-updated" id="tradfi-updated"></span>
+            </div>
+            <div class="panel-body no-pad tradfi-body">
+              <div class="tradfi-grid" id="tradfi-grid">
+
+                <div class="tf-card" id="tf-cl">
+                  <div class="tf-header"><span class="tf-symbol">CL</span><span class="tf-name">Crude Oil</span></div>
+                  <div class="tf-price" id="tf-cl-price">──</div>
+                  <div class="tf-change neutral" id="tf-cl-change">──%</div>
+                  <canvas class="tf-spark" id="tf-cl-spark"></canvas>
+                  <div class="tf-hl">
+                    <span><span class="tf-lbl">H</span><span id="tf-cl-high">──</span></span>
+                    <span><span class="tf-lbl">L</span><span id="tf-cl-low">──</span></span>
+                  </div>
+                </div>
+
+                <div class="tf-card" id="tf-natgas">
+                  <div class="tf-header"><span class="tf-symbol">NATGAS</span><span class="tf-name">Natural Gas</span></div>
+                  <div class="tf-price" id="tf-natgas-price">──</div>
+                  <div class="tf-change neutral" id="tf-natgas-change">──%</div>
+                  <canvas class="tf-spark" id="tf-natgas-spark"></canvas>
+                  <div class="tf-hl">
+                    <span><span class="tf-lbl">H</span><span id="tf-natgas-high">──</span></span>
+                    <span><span class="tf-lbl">L</span><span id="tf-natgas-low">──</span></span>
+                  </div>
+                </div>
+
+                <div class="tf-card" id="tf-spy">
+                  <div class="tf-header"><span class="tf-symbol">SPY</span><span class="tf-name">S&amp;P 500 ETF</span></div>
+                  <div class="tf-price" id="tf-spy-price">──</div>
+                  <div class="tf-change neutral" id="tf-spy-change">──%</div>
+                  <canvas class="tf-spark" id="tf-spy-spark"></canvas>
+                  <div class="tf-hl">
+                    <span><span class="tf-lbl">H</span><span id="tf-spy-high">──</span></span>
+                    <span><span class="tf-lbl">L</span><span id="tf-spy-low">──</span></span>
+                  </div>
+                </div>
+
+                <div class="tf-card" id="tf-qqq">
+                  <div class="tf-header"><span class="tf-symbol">QQQ</span><span class="tf-name">Nasdaq ETF</span></div>
+                  <div class="tf-price" id="tf-qqq-price">──</div>
+                  <div class="tf-change neutral" id="tf-qqq-change">──%</div>
+                  <canvas class="tf-spark" id="tf-qqq-spark"></canvas>
+                  <div class="tf-hl">
+                    <span><span class="tf-lbl">H</span><span id="tf-qqq-high">──</span></span>
+                    <span><span class="tf-lbl">L</span><span id="tf-qqq-low">──</span></span>
+                  </div>
+                </div>
+
+                <div class="tf-card" id="tf-xau">
+                  <div class="tf-header"><span class="tf-symbol">XAU</span><span class="tf-name">Gold</span></div>
+                  <div class="tf-price" id="tf-xau-price">──</div>
+                  <div class="tf-change neutral" id="tf-xau-change">──%</div>
+                  <canvas class="tf-spark" id="tf-xau-spark"></canvas>
+                  <div class="tf-hl">
+                    <span><span class="tf-lbl">H</span><span id="tf-xau-high">──</span></span>
+                    <span><span class="tf-lbl">L</span><span id="tf-xau-low">──</span></span>
+                  </div>
+                </div>
+
+                <div class="tf-card" id="tf-xag">
+                  <div class="tf-header"><span class="tf-symbol">XAG</span><span class="tf-name">Silver</span></div>
+                  <div class="tf-price" id="tf-xag-price">──</div>
+                  <div class="tf-change neutral" id="tf-xag-change">──%</div>
+                  <canvas class="tf-spark" id="tf-xag-spark"></canvas>
+                  <div class="tf-hl">
+                    <span><span class="tf-lbl">H</span><span id="tf-xag-high">──</span></span>
+                    <span><span class="tf-lbl">L</span><span id="tf-xag-low">──</span></span>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── NEWS ── -->
+      <div class="grid-stack-item" gs-x="5" gs-y="0" gs-w="2" gs-h="9" gs-id="news">
+        <div class="grid-stack-item-content">
+          <div class="panel" id="news-panel">
+            <div class="panel-header">
+              <span class="panel-title">Market News</span>
+              <span class="panel-tag" id="news-feed-tag">──</span>
+              <span class="status-dot blink small ml-auto"></span>
+            </div>
+            <div class="panel-body no-pad scroll-body">
+              <div class="news-feed" id="news-feed">
+                <div class="feed-loading">Loading feed…</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Crypto News ── -->
+      <div class="grid-stack-item" gs-x="5" gs-y="9" gs-w="2" gs-h="6" gs-id="cryptonews">
+        <div class="grid-stack-item-content">
+          <div class="panel" id="crypto-news-panel">
+            <div class="panel-header">
+              <span class="panel-title">Crypto News</span>
+              <span class="panel-tag" id="crypto-news-tag">──</span>
+              <span class="status-dot blink small ml-auto"></span>
+            </div>
+            <div class="panel-body no-pad scroll-body">
+              <div class="news-feed" id="crypto-news-feed">
+                <div class="feed-loading">Loading feed…</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── QUANT ANALYSIS ── -->
+      <div class="grid-stack-item" gs-x="7" gs-y="24" gs-w="5" gs-h="11" gs-id="quant">
+        <div class="grid-stack-item-content">
+          <div class="panel">
+            <div class="panel-header">
+              <span class="panel-title">Quant Analysis</span>
+              <span class="panel-tag">AI Signals</span>
+              <div class="heatmap-toggle">
+                <button class="hm-btn active" id="quant-btc" onclick="setQuantSymbol('BTC')">BTC</button>
+                <button class="hm-btn"        id="quant-eth" onclick="setQuantSymbol('ETH')">ETH</button>
+              </div>
+              <span class="quant-updated" id="quant-updated"></span>
+            </div>
+            <div class="panel-body no-pad quant-body" id="quant-body">
+              <div class="quant-loading">Initialising quant engine…</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── CALENDAR ── -->
+      <div class="grid-stack-item" gs-x="5" gs-y="35" gs-w="7" gs-h="9" gs-id="calendar">
+        <div class="grid-stack-item-content">
+          <div class="panel">
+            <div class="panel-header">
+              <span class="panel-title">Economic Calendar</span>
+              <span class="panel-tag">Forex Factory</span>
+              <a class="panel-link" href="https://www.forexfactory.com/calendar" target="_blank">Forex Factory ↗</a>
+            </div>
+            <!-- column labels -->
+            <div class="cal-col-head">
+              <span class="cch-time">Time (UTC)</span>
+              <span class="cch-ccy">Currency</span>
+              <span class="cch-dot"></span>
+              <span class="cch-event">Event</span>
+              <span class="cch-f">Forecast</span>
+              <span class="cch-a">Actual</span>
+              <span class="cch-p">Previous</span>
+            </div>
+            <div class="panel-body no-pad cal-body">
+              <div class="cal-scroll" id="cal-feed">
+                <div class="feed-loading">Loading calendar…</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── YOUTUBE BTC ── -->
+      <div class="grid-stack-item" gs-x="0" gs-y="0" gs-w="5" gs-h="16" gs-id="ytbtc">
+        <div class="grid-stack-item-content">
+          <div class="panel">
+            <div class="panel-header">
+              <span class="panel-title">BTC Bookmap</span>
+              <span class="panel-tag">LBorderPulse</span>
+              <span class="status-dot small ml-auto" id="btc-stream-dot"></span>
+            </div>
+            <div class="panel-body no-pad stream-video-body">
+              <video id="btc-stream-video" muted playsinline autoplay></video>
+              <div class="stream-overlay" id="btc-stream-overlay">
+                <div class="stream-overlay-icon">◉</div>
+                <div class="stream-overlay-msg" id="btc-stream-msg">Connecting…</div>
+                <button class="stream-retry-btn" onclick="retryStream('btc')">Retry</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── YOUTUBE ETH ── -->
+      <div class="grid-stack-item" gs-x="0" gs-y="16" gs-w="5" gs-h="17" gs-id="yteth">
+        <div class="grid-stack-item-content">
+          <div class="panel">
+            <div class="panel-header">
+              <span class="panel-title">ETH Bookmap</span>
+              <span class="panel-tag">LBorderPulse</span>
+              <span class="status-dot small ml-auto" id="eth-stream-dot"></span>
+            </div>
+            <div class="panel-body no-pad stream-video-body">
+              <video id="eth-stream-video" muted playsinline autoplay></video>
+              <div class="stream-overlay" id="eth-stream-overlay">
+                <div class="stream-overlay-icon">◉</div>
+                <div class="stream-overlay-msg" id="eth-stream-msg">Connecting…</div>
+                <button class="stream-retry-btn" onclick="retryStream('eth')">Retry</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── World Clock ── -->
+      <div class="grid-stack-item" gs-x="7" gs-y="4" gs-w="5" gs-h="2" gs-id="worldclock">
+        <div class="grid-stack-item-content">
+          <div class="panel">
+            <div class="panel-header">
+              <span class="panel-title">World Clock</span>
+              <span class="status-dot blink small ml-auto"></span>
+            </div>
+            <div class="panel-body center-content wc-body">
+              <div class="wc-zones">
+                <div class="wc-zone">
+                  <div class="wc-city">UTC</div>
+                  <div class="wc-time" id="wc-utc">──:──:──</div>
+                  <div class="wc-date" id="wc-utc-date">────────</div>
+                  <div class="wc-offset">+00:00</div>
+                </div>
+                <div class="wc-divider"></div>
+                <div class="wc-zone">
+                  <div class="wc-city">New York</div>
+                  <div class="wc-time" id="wc-ny">──:──:──</div>
+                  <div class="wc-date" id="wc-ny-date">────────</div>
+                  <div class="wc-offset" id="wc-ny-offset">ET</div>
+                </div>
+                <div class="wc-divider"></div>
+                <div class="wc-zone">
+                  <div class="wc-city">Hong Kong</div>
+                  <div class="wc-time" id="wc-hk">──:──:──</div>
+                  <div class="wc-date" id="wc-hk-date">────────</div>
+                  <div class="wc-offset">HKT +08:00</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Market Sessions ── -->
+      <div class="grid-stack-item" gs-x="5" gs-y="15" gs-w="2" gs-h="4" gs-id="sessions">
+        <div class="grid-stack-item-content">
+          <div class="panel">
+            <div class="panel-header">
+              <span class="panel-title">Market Sessions</span>
+              <span class="panel-tag">Forex</span>
+              <span class="status-dot blink small ml-auto"></span>
+            </div>
+            <div class="panel-body no-pad" id="sessions-body">
+              <!-- rendered by JS -->
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Open Interest ── -->
+      <div class="grid-stack-item" gs-x="5" gs-y="19" gs-w="2" gs-h="5" gs-id="openinterest">
+        <div class="grid-stack-item-content">
+          <div class="panel">
+            <div class="panel-header">
+              <span class="panel-title">Open Interest</span>
+              <span class="panel-tag" id="oi-tag">48h · BTC</span>
+              <div class="heatmap-toggle">
+                <button class="hm-btn active" id="oi-btc" onclick="setOiSymbol('BTC')">BTC</button>
+                <button class="hm-btn"        id="oi-eth" onclick="setOiSymbol('ETH')">ETH</button>
+              </div>
+              <span class="oi-header-stats" id="oi-header-stats"></span>
+            </div>
+            <div class="panel-body no-pad oi-chart-body">
+              <canvas id="oi-canvas" class="oi-canvas"></canvas>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Kronos Forecast ── -->
+      <div class="grid-stack-item" gs-x="7" gs-y="21" gs-w="5" gs-h="3" gs-id="forecast">
+        <div class="grid-stack-item-content">
+          <div class="panel">
+            <div class="panel-header">
+              <span class="panel-title">Kronos Forecast</span>
+              <span class="panel-tag" id="fc-tag">12h · BTC</span>
+              <div class="heatmap-toggle">
+                <button class="hm-btn active" id="fc-btc" onclick="setForecastSymbol('BTC')">BTC</button>
+                <button class="hm-btn"        id="fc-eth" onclick="setForecastSymbol('ETH')">ETH</button>
+              </div>
+              <span class="fc-generated" id="fc-generated"></span>
+            </div>
+            <div class="panel-body no-pad fc-chart-body" id="fc-body">
+              <canvas id="fc-canvas" class="fc-canvas"></canvas>
+              <div class="fc-overlay" id="fc-overlay">
+                <div class="fc-overlay-icon">◈</div>
+                <div class="fc-overlay-msg" id="fc-overlay-msg">Loading…</div>
+                <div class="fc-overlay-sub" id="fc-overlay-sub"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /grid-stack -->
+  </div><!-- /grid-wrapper -->
+
+  <script src="https://cdn.jsdelivr.net/npm/gridstack@10.3.1/dist/gridstack-all.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest/dist/hls.min.js"></script>
+  <script src="config.js"></script>
+  <script src="js/dashboard.js"></script>
+</body>
+</html>
