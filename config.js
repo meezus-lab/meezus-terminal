@@ -8,8 +8,8 @@ const CONFIG = {
   // Paste your token here to enable the Economic Calendar widget.
   finnhubApiKey: '',
   youtube: {
-    btcStreamId: 'hFSVrJEldlo',
-    ethStreamId: '1gcTeXRm0ec',
+    btcStreamId: 's1haZKOzV-0',
+    ethStreamId: 'yj24zclwWf4',
 
     // Invidious instance used to bypass YouTube's embed restrictions.
     // If streams stop loading, try swapping to another instance:
