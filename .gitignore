@@ -17,3 +17,7 @@ kronos_src/
 # ─── Local launch agents / logs ─────────────────────────────────────────────
 *.log
 com.meezus.dashboard.plist
+
+# ─── Generated runtime data ─────────────────────────────────────────────────
+# Rolling Crypto-Pulse sentiment history; rebuilt on each machine as it runs.
+pulse_history.json

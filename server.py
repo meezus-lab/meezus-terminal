@@ -68,6 +68,20 @@ def _rss_date_ms(s):
         return int(time.time() * 1000)
 
 
+def _iso_date_ms(s):
+    """Parse ISO-8601 (StockTwits / Lemmy) to epoch ms, UTC-correct."""
+    if not s:
+        return int(time.time() * 1000)
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(s.replace('Z', '+00:00'))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1000)
+    except Exception:
+        return _rss_date_ms(s)
+
+
 def _http_get(url, timeout=12, extra_headers=None):
     """Single helper for all upstream GETs — UA + SSL ctx baked in."""
     headers = {'User-Agent': _USER_AGENT}
@@ -108,6 +122,306 @@ OI_CACHE_TTL   = 300   # 5 minutes
 _pulse_cache      = None       # (bytes, timestamp)
 _pulse_cache_lock = threading.Lock()
 PULSE_CACHE_TTL   = 4 * 3600   # 4 hours
+
+# ── Sentiment scoring engine (VADER heuristics + finance/crypto lexicon) ──────
+# A faithful port of the VADER model (Hutto & Gilbert, ICWSM-2014) — lexicon
+# valence plus five context heuristics — over a lexicon that merges:
+#   • VADER's general-emotion core,
+#   • the Loughran-McDonald financial dictionary (the accounting-research
+#     standard, built precisely because general lexicons misread finance
+#     register — e.g. "liability", "cut", "tax" aren't inherently negative),
+#   • a hand-tuned crypto-slang layer.
+# Heuristics applied: ALL-CAPS emphasis, degree modifiers, negation flip,
+# contrastive "but", and punctuation emphasis. Output compound ∈ [-1, +1].
+PULSE_HALFLIFE_H   = 12.0   # recency half-life (h) for post weighting
+PULSE_SENSITIVITY  = 215    # maps reach-weighted mean compound onto -100..100
+PULSE_HISTORY_FILE = os.path.join(DIRECTORY, 'pulse_history.json')
+PULSE_HISTORY_MAX  = 84     # ~14 days at the 4h refresh cadence
+
+_VADER_B_INCR   = 0.293     # degree-modifier increment
+_VADER_C_INCR   = 0.733     # ALL-CAPS emphasis increment
+_VADER_N_SCALAR = -0.74     # negation scalar
+_PUNC_STRIP     = '!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'
+
+_VADER_NEGATE = {
+    'not', 'no', 'never', 'none', 'nobody', 'nowhere', 'nothing', 'neither',
+    'nor', 'without', 'cannot', 'cant', 'wont', 'arent', 'isnt', 'wasnt',
+    'werent', 'dont', 'doesnt', 'didnt', 'aint', 'havent', 'hasnt', 'hadnt',
+    'couldnt', 'wouldnt', 'shouldnt', 'despite', 'lack', 'lacks', 'lacking',
+}
+
+# Degree modifiers — intensify (+) or dampen (-) the following sentiment word.
+_VADER_BOOST = {
+    'absolutely': 0.293, 'amazingly': 0.293, 'completely': 0.293,
+    'considerably': 0.293, 'decidedly': 0.293, 'deeply': 0.293,
+    'enormously': 0.293, 'entirely': 0.293, 'especially': 0.293,
+    'exceptionally': 0.293, 'extremely': 0.293, 'fully': 0.293, 'hugely': 0.293,
+    'incredibly': 0.293, 'intensely': 0.293, 'majorly': 0.293,
+    'massively': 0.293, 'more': 0.293, 'most': 0.293, 'particularly': 0.293,
+    'purely': 0.293, 'quite': 0.293, 'really': 0.293, 'remarkably': 0.293,
+    'so': 0.293, 'substantially': 0.293, 'thoroughly': 0.293, 'totally': 0.293,
+    'tremendously': 0.293, 'unbelievably': 0.293, 'utterly': 0.293,
+    'very': 0.293, 'super': 0.293, 'insanely': 0.293,
+    'almost': -0.293, 'barely': -0.293, 'hardly': -0.293, 'kinda': -0.293,
+    'less': -0.293, 'little': -0.293, 'marginally': -0.293, 'partly': -0.293,
+    'scarcely': -0.293, 'slightly': -0.293, 'somewhat': -0.293, 'sorta': -0.293,
+}
+
+# Multi-word idioms scored as a phrase (overrides token-level scoring).
+_VADER_IDIOMS = {
+    'to the moon': 3.0, 'buy the dip': 1.5, 'diamond hands': 1.8,
+    'paper hands': -1.5, 'exit liquidity': -2.5, 'bull trap': -1.5,
+    'bear trap': 1.0, 'dead cat bounce': -1.5, 'selling pressure': -1.8,
+    'buying pressure': 1.8, 'all time high': 3.0, 'all-time high': 3.0,
+    'all time low': -3.0, 'all-time low': -3.0, 'record high': 2.6,
+    'record low': -2.6, 'short squeeze': 1.6, 'risk off': -2.0, 'risk on': 2.0,
+    'flight to safety': -1.5, 'soft landing': 1.6, 'hard landing': -2.4,
+    'rug pull': -3.2, 'pump and dump': -2.6, 'god candle': 3.0,
+    'blood bath': -3.0, 'bloodbath': -3.0, 'melt up': 2.6, 'melt-up': 2.6,
+    'sell off': -2.4, 'sell-off': -2.4, 'death cross': -2.4, 'golden cross': 2.4,
+}
+
+# Merged sentiment lexicon — every token appears once; valence ∈ [-4, +4].
+_PULSE_LEX = {
+    # ── Crypto-native bullish ──
+    'moon': 3.2, 'mooning': 3.2, 'lambo': 2.4, 'ath': 2.5, 'breakout': 2.8,
+    'breakouts': 2.6, 'pump': 2.0, 'pumping': 2.0, 'pumped': 1.5, 'rally': 2.6,
+    'rallies': 2.6, 'rallying': 2.6, 'surge': 2.6, 'surging': 2.6, 'surged': 2.6,
+    'soar': 2.8, 'soaring': 2.8, 'soared': 2.8, 'parabolic': 3.0, 'bullish': 2.8,
+    'bull': 1.8, 'bulls': 1.6, 'bullrun': 3.2, 'bullruns': 3.0, 'supercycle': 2.6,
+    'hodl': 1.2, 'hodling': 1.2, 'accumulate': 1.6, 'accumulating': 1.6,
+    'accumulation': 1.6, 'stacking': 1.5, 'adoption': 2.2, 'mainstream': 1.6,
+    'institutional': 1.4, 'etf': 1.0, 'approval': 2.2, 'approved': 2.4,
+    'breakthrough': 2.6, 'milestone': 1.8, 'halving': 1.6, 'rebound': 2.0,
+    'rebounded': 2.0, 'bounce': 1.6, 'bouncing': 1.6, 'oversold': 1.0,
+    'rocket': 2.6, 'gem': 1.6, 'alpha': 1.4, 'upside': 1.8, 'inflow': 1.8,
+    'inflows': 2.0, 'tailwind': 1.6, 'tailwinds': 1.6,
+
+    # ── Crypto-native bearish ──
+    'crash': -3.4, 'crashing': -3.4, 'crashed': -3.4, 'meltdown': -3.4,
+    'dump': -2.4, 'dumping': -2.4, 'dumped': -2.4, 'tank': -2.6, 'tanking': -2.6,
+    'tanked': -2.6, 'bearish': -2.8, 'bear': -1.6, 'bears': -1.6, 'rekt': -2.8,
+    'liquidated': -2.6, 'liquidation': -2.4, 'liquidations': -2.4, 'liqd': -2.2,
+    'capitulation': -3.0, 'capitulate': -3.0, 'capitulating': -3.0,
+    'rug': -3.2, 'rugged': -3.2, 'rugpull': -3.6, 'scam': -3.0, 'ponzi': -3.2,
+    'fraud': -3.2, 'hack': -2.6, 'hacked': -2.8, 'exploit': -2.4,
+    'exploited': -2.6, 'breach': -2.4, 'drained': -2.6, 'fud': -1.8,
+    'selloff': -2.6, 'outflow': -1.8, 'outflows': -2.0, 'overbought': -1.2,
+    'bubble': -1.6, 'worthless': -3.2, 'doomed': -2.8, 'bleeding': -2.0,
+    'bagholder': -1.6, 'bagholders': -1.6, 'delisted': -2.4, 'delisting': -2.4,
+    'headwind': -1.6, 'headwinds': -1.6, 'contagion': -2.6,
+
+    # ── Loughran-McDonald financial — positive ──
+    'gain': 1.6, 'gains': 1.8, 'gained': 1.6, 'gaining': 1.6, 'profit': 1.8,
+    'profits': 1.8, 'profitable': 1.8, 'growth': 1.6, 'growing': 1.4,
+    'beat': 1.4, 'beats': 1.4, 'outperform': 2.0, 'outperformed': 2.0,
+    'outperforming': 2.0, 'upgrade': 1.6, 'upgraded': 1.6, 'robust': 1.6,
+    'resilient': 1.6, 'recovery': 1.8, 'recovered': 1.6, 'optimistic': 1.8,
+    'optimism': 1.8, 'surplus': 1.2, 'boom': 2.2, 'booming': 2.2,
+    'expansion': 1.4, 'opportunity': 1.2, 'advance': 1.2, 'advanced': 1.0,
+    'rose': 1.0, 'rises': 1.0, 'rising': 1.0, 'jumped': 1.6, 'jump': 1.4,
+    'climb': 1.2, 'climbed': 1.2, 'climbing': 1.2, 'higher': 1.0, 'record': 1.2,
+
+    # ── Loughran-McDonald financial — negative ──
+    'loss': -1.8, 'losses': -1.8, 'losing': -1.6, 'decline': -1.6,
+    'declined': -1.6, 'declining': -1.6, 'declines': -1.6, 'downturn': -2.0,
+    'recession': -2.4, 'slowdown': -1.6, 'slump': -2.2, 'slumped': -2.2,
+    'plummet': -3.0, 'plummeted': -3.0, 'plummeting': -3.0, 'plunge': -3.0,
+    'plunged': -3.0, 'plunging': -3.0, 'tumble': -2.4, 'tumbled': -2.4,
+    'tumbling': -2.4, 'fell': -1.4, 'falling': -1.4, 'falls': -1.4,
+    'drop': -1.4, 'dropped': -1.4, 'dropping': -1.4, 'sink': -1.8,
+    'sinking': -1.8, 'sank': -1.8, 'miss': -1.4, 'missed': -1.4,
+    'underperform': -2.0, 'downgrade': -1.8, 'downgraded': -1.8,
+    'warning': -1.4, 'warn': -1.4, 'warns': -1.4, 'warned': -1.4, 'fear': -1.8,
+    'fears': -1.8, 'risk': -0.8, 'risks': -0.8, 'risky': -1.6,
+    'uncertainty': -1.4, 'uncertain': -1.2, 'volatile': -0.8, 'volatility': -0.6,
+    'deficit': -1.4, 'layoffs': -2.0, 'layoff': -2.0, 'lower': -0.9,
+    'lowered': -1.2, 'struggle': -1.8, 'struggling': -1.8, 'struggles': -1.8,
+    'pressure': -1.0, 'slashed': -1.8, 'slash': -1.6, 'freeze': -1.4,
+    'frozen': -1.4, 'probe': -1.4, 'investigation': -1.6, 'charges': -1.6,
+    'fined': -1.4, 'penalty': -1.6, 'sanctions': -1.8, 'lawsuit': -1.8,
+    'sued': -1.8, 'ban': -2.4, 'banned': -2.4, 'halt': -1.6, 'halted': -1.8,
+    'default': -2.6, 'insolvent': -3.0, 'insolvency': -3.0, 'bankruptcy': -3.2,
+    'bankrupt': -3.2, 'crisis': -2.4, 'panic': -2.6, 'turmoil': -2.2,
+
+    # ── General emotion — positive ──
+    'great': 2.0, 'amazing': 2.6, 'awesome': 2.6, 'excellent': 2.6,
+    'fantastic': 2.6, 'brilliant': 2.4, 'best': 2.0, 'better': 1.2, 'good': 1.4,
+    'solid': 1.4, 'perfect': 2.8, 'incredible': 2.4, 'win': 1.6, 'wins': 1.6,
+    'winning': 1.6, 'winner': 1.8, 'victory': 1.8, 'success': 1.8,
+    'successful': 1.8, 'positive': 1.2, 'love': 1.8, 'loved': 1.6,
+    'hopeful': 1.2, 'confident': 1.6, 'promising': 1.6, 'strong': 1.6,
+    'stronger': 1.6, 'strongest': 2.0,
+
+    # ── General emotion — negative ──
+    'bad': -1.6, 'terrible': -2.8, 'awful': -2.8, 'horrible': -2.8,
+    'worst': -3.0, 'worse': -2.0, 'poor': -1.4, 'fail': -2.0, 'fails': -2.0,
+    'failed': -2.0, 'failing': -2.0, 'failure': -2.2, 'weak': -1.6,
+    'weaker': -1.6, 'weakest': -2.0, 'pathetic': -2.6, 'garbage': -2.6,
+    'trash': -2.6, 'disaster': -2.8, 'disastrous': -2.8, 'danger': -1.8,
+    'dangerous': -1.8, 'negative': -1.2, 'hate': -2.2, 'scared': -1.8,
+    'scary': -1.6, 'ugly': -1.6, 'dead': -2.0, 'dying': -2.2, 'nightmare': -2.6,
+    'chaos': -2.2, 'collapse': -3.4, 'collapsed': -3.4, 'collapsing': -3.4,
+}
+
+# Entity buckets — tag each post by what it's about, for the topic breakdown.
+_ENTITY_PATTERNS = [
+    ('BTC',        re.compile(r'\b(bitcoin|btc|satoshi)\b', re.I)),
+    ('ETH',        re.compile(r'\b(ethereum|ether|eth|vitalik)\b', re.I)),
+    ('SOL',        re.compile(r'\b(solana|sol)\b', re.I)),
+    ('ETF',        re.compile(r'\b(etf|etfs|blackrock|ibit|grayscale|fidelity)\b', re.I)),
+    ('REGULATION', re.compile(r'\b(sec|cftc|regulat\w*|lawsuit|court|congress|senate|gensler|legal|sue[ds]?)\b', re.I)),
+    ('MACRO',      re.compile(r'\b(fed|fomc|powell|cpi|inflation|rate\s?(cut|hike)|interest rate|treasury|recession|gdp|yields?|jobs)\b', re.I)),
+    ('HACK',       re.compile(r'\b(hack\w*|exploit\w*|breach|drained|stolen|scam|rug\w*|phishing)\b', re.I)),
+    ('STABLES',    re.compile(r'\b(stablecoin|usdt|usdc|tether|circle|dai)\b', re.I)),
+    ('DEFI',       re.compile(r'\b(defi|staking|yield|uniswap|aave|lending)\b', re.I)),
+]
+
+
+def _allcap_differential(raw_tokens):
+    """True when SOME (but not all) tokens are ALL-CAPS — VADER's caps gate."""
+    allcap = sum(1 for w in raw_tokens if len(w) > 1 and w.isupper() and w.isalpha())
+    return 0 < allcap < len(raw_tokens)
+
+
+def _vader_scalar(src_token, valence, is_cap_diff):
+    """Degree-modifier contribution for a booster token preceding a senti word."""
+    s = _VADER_BOOST.get(src_token.lower().strip(_PUNC_STRIP), 0.0)
+    if s == 0.0:
+        return 0.0
+    if valence < 0:
+        s = -s
+    if src_token.isupper() and is_cap_diff:
+        s += _VADER_B_INCR if valence > 0 else -_VADER_B_INCR
+    return s
+
+
+def _vader_compound(text):
+    """VADER-style sentiment. Returns (compound ∈ [-1,1], lexicon_hit_count)."""
+    if not text:
+        return 0.0, 0
+    raw = text.split()
+    toks = [t.strip(_PUNC_STRIP).replace('’', "'") for t in raw]
+    is_cap_diff = _allcap_differential(raw)
+    sentiments, hits, n = [], 0, len(toks)
+
+    for i in range(n):
+        low = toks[i].lower()
+        if low in _VADER_BOOST:          # boosters score 0 on their own
+            sentiments.append(0.0)
+            continue
+        v = _PULSE_LEX.get(low)
+        if v is None:
+            sentiments.append(0.0)
+            continue
+        hits += 1
+        if raw[i].isupper() and is_cap_diff and len(toks[i]) > 1:
+            v += _VADER_C_INCR if v > 0 else -_VADER_C_INCR
+        # preceding 3 tokens: degree modifiers (damped by distance)
+        for dist in (1, 2, 3):
+            j = i - dist
+            if j >= 0 and toks[j].lower() not in _PULSE_LEX:
+                s = _vader_scalar(raw[j], v, is_cap_diff)
+                if dist == 2:
+                    s *= 0.95
+                elif dist == 3:
+                    s *= 0.90
+                v += s
+        # negation flip over the same 3-token window
+        for dist in (1, 2, 3):
+            j = i - dist
+            if j >= 0 and toks[j].lower() in _VADER_NEGATE:
+                v *= _VADER_N_SCALAR
+                break
+        sentiments.append(v)
+
+    # contrastive conjunction "but" — pre-but ×0.5, post-but ×1.5
+    low_toks = [t.lower() for t in toks]
+    if 'but' in low_toks:
+        bi = low_toks.index('but')
+        for k in range(len(sentiments)):
+            if k < bi:
+                sentiments[k] *= 0.5
+            elif k > bi:
+                sentiments[k] *= 1.5
+
+    s = sum(sentiments)
+    # punctuation emphasis (sign-aware)
+    ep = min(text.count('!'), 4) * 0.292
+    qm = text.count('?')
+    qd = (qm * 0.18 if qm <= 3 else 0.96) if qm > 1 else 0.0
+    punct = ep + qd
+    if s > 0:
+        s += punct
+    elif s < 0:
+        s -= punct
+
+    # multi-word idioms — fold into the raw sum before normalisation
+    low_text = ' ' + text.lower() + ' '
+    for phrase, val in _VADER_IDIOMS.items():
+        if phrase in low_text:
+            s += val
+            hits += 1
+
+    compound = s / math.sqrt(s * s + 15) if s else 0.0
+    return compound, hits
+
+
+def _tag_entities(text):
+    return [name for name, pat in _ENTITY_PATTERNS if pat.search(text)]
+
+
+def _pulse_classify(score):
+    if score >= 55:  return ('Euphoria', 'euphoria')
+    if score >= 22:  return ('Bullish', 'bullish')
+    if score >= 8:   return ('Mild Bullish', 'mild-bullish')
+    if score > -8:   return ('Neutral', 'neutral')
+    if score > -22:  return ('Mild Bearish', 'mild-bearish')
+    if score > -55:  return ('Bearish', 'bearish')
+    return ('Capitulation', 'capitulation')
+
+
+def _pulse_divergence(price_chg, sent_slope):
+    """Price trend vs social-mood trend → the actionable divergence signal."""
+    sent_pts = round(sent_slope * 100, 1)
+    base = {'price24h': round(price_chg, 1), 'sent': sent_pts}
+    p_up, p_dn = price_chg > 0.8, price_chg < -0.8
+    s_up, s_dn = sent_slope > 0.04, sent_slope < -0.04
+    if p_up and s_dn:
+        return {**base, 'state': 'bearish', 'label': 'Bearish Divergence',
+                'detail': 'Price climbing while social mood cools — distribution risk.'}
+    if p_dn and s_up:
+        return {**base, 'state': 'bullish', 'label': 'Bullish Divergence',
+                'detail': 'Price falling while mood warms — possible accumulation / capitulation bottom.'}
+    if p_up and s_up:
+        return {**base, 'state': 'confirm-bull', 'label': 'Bullish Confirmation',
+                'detail': 'Price and mood rising together — trend supported.'}
+    if p_dn and s_dn:
+        return {**base, 'state': 'confirm-bear', 'label': 'Bearish Confirmation',
+                'detail': 'Price and mood falling together — downtrend intact.'}
+    return {**base, 'state': 'neutral', 'label': 'No Divergence',
+            'detail': 'Price and mood broadly aligned — no actionable gap.'}
+
+
+def _pulse_history_load():
+    try:
+        with open(PULSE_HISTORY_FILE) as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _pulse_history_append(entry):
+    hist = _pulse_history_load()
+    hist.append(entry)
+    hist = hist[-PULSE_HISTORY_MAX:]
+    try:
+        with open(PULSE_HISTORY_FILE, 'w') as f:
+            json.dump(hist, f)
+    except Exception as e:
+        print(f'[MEEZUS] Pulse history save failed: {str(e)[:80]}')
+    return hist
 
 # ── Quant analysis cache ──────────────────────────────────────────────────────
 # Computes technical indicators + generates narrative for BTC and ETH.
@@ -421,9 +735,18 @@ def get_stream_url(video_id):
     print(f'[MEEZUS] yt-dlp    : {video_id} — fetching stream URL...')
 
     yt_url    = f'https://www.youtube.com/watch?v={video_id}'
+    # Resolution ceiling for the Bookmap streams. YouTube hands us a SINGLE-
+    # rendition HLS playlist (no client-side ABR levels to cap), so the quality
+    # is chosen here. Kept at 1080p for full legibility of Bookmap's fine text.
+    # Lower MAX_H (e.g. 720 or 480) to trade sharpness for browser RAM — decode
+    # memory scales with pixel count (480p ≈ 5× fewer pixels/frame than 1080p).
+    # Falls back to best if no rendition ≤ MAX_H exists.
+    MAX_H     = 1080
     base_args = [
         'yt-dlp', '--no-playlist', '--no-warnings',
-        '--format', 'best[protocol=m3u8_native]/best[protocol=m3u8]/best',
+        '--format',
+        f'best[protocol=m3u8_native][height<={MAX_H}]/best[protocol=m3u8][height<={MAX_H}]/'
+        f'best[height<={MAX_H}]/best[protocol=m3u8_native]/best[protocol=m3u8]/best',
         '-g',
     ]
 
@@ -476,6 +799,15 @@ class MeezusHandler(http.server.SimpleHTTPRequestHandler):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=DIRECTORY, **kwargs)
+
+    def end_headers(self):
+        # Force browsers to revalidate local assets (HTML/JS/CSS) so edits show
+        # up on a normal reload — no hard-refresh needed. The handler still
+        # answers If-Modified-Since with 304 when unchanged, so it stays cheap.
+        # API responses (path starts with /api/) manage their own caching.
+        if not self.path.startswith('/api/'):
+            self.send_header('Cache-Control', 'no-cache')
+        super().end_headers()
 
     # ── Routing ───────────────────────────────────────────────────────────────
     def do_GET(self):
@@ -669,18 +1001,13 @@ class MeezusHandler(http.server.SimpleHTTPRequestHandler):
         self._send_bytes(data, 'application/json', cache='max-age=60')
 
     # ── /api/sentiment ───────────────────────────────────────────────────────
-    # Subreddits scraped for the Pulse. Crypto-native subs dominate; we also
-    # pull a couple of macro/tradfi subs because rate news, equity panics etc.
-    # drive crypto sentiment heavily.
-    PULSE_SUBS = [
-        ('CryptoCurrency',  1.00),
-        ('Bitcoin',         1.00),
-        ('CryptoMarkets',   1.00),
-        ('ethereum',        0.85),
-        ('SatoshiStreetBets', 0.65),
-        ('wallstreetbets',  0.50),   # tradfi vibes leak into crypto
-        ('StockMarket',     0.45),
-    ]
+    # Social sources for the Pulse. Reddit's unauthenticated .json API now hard-
+    # blocks (403), so retail social comes from StockTwits (traders self-tag
+    # posts Bullish/Bearish — an explicit signal) plus Lemmy crypto communities.
+    PULSE_ST_SYMBOLS = [('BTC.X', '$BTC'), ('ETH.X', '$ETH')]
+    PULSE_LEMMY      = ['cryptocurrency', 'bitcoin']
+    PULSE_UA = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36')
 
     # Crypto-relevant keyword filter for non-crypto sources (HN, macro RSS).
     PULSE_CRYPTO_RE = re.compile(
@@ -690,12 +1017,15 @@ class MeezusHandler(http.server.SimpleHTTPRequestHandler):
 
     def handle_sentiment(self):
         """
-        Aggregates multi-source crypto sentiment:
-          • Reddit  — 7 subs (crypto-native + tradfi adjacent), weighted
-          • RSS     — crypto-native headlines (CoinDesk, Cointelegraph, etc.)
-          • RSS     — tradfi headlines filtered for crypto/macro keywords
-          • HN      — front page top stories filtered for crypto/macro keywords
-        Browser still does the scoring; we just deliver normalised items.
+        Multi-source crypto sentiment, scored server-side (VADER + finance/crypto
+        lexicon) and aggregated into a single index plus trend, divergence,
+        topic breakdown and movers:
+          • StockTwits — retail traders, explicit Bullish/Bearish self-tags (social)
+          • Lemmy      — decentralised crypto communities (social)
+          • RSS        — crypto-native headlines (CoinDesk, Cointelegraph, …) (news)
+          • RSS        — tradfi headlines filtered for crypto/macro relevance (news)
+          • HN         — front-page stories filtered for crypto/macro (news)
+        Persists each reading to pulse_history.json for the trend sparkline.
         Cached 4h; serves stale cache on upstream failure.
         """
         global _pulse_cache
@@ -712,42 +1042,80 @@ class MeezusHandler(http.server.SimpleHTTPRequestHandler):
         items   = []
         sources = []
 
-        # ── 1. Reddit ──────────────────────────────────────────────────────
-        for sub, weight in self.PULSE_SUBS:
-            url = f'https://www.reddit.com/r/{sub}/hot.json?limit=30'
+        # ── 1. StockTwits — retail trader stream w/ explicit bull/bear tags ─
+        for sym, label in self.PULSE_ST_SYMBOLS:
             try:
-                with _http_get(url, timeout=10, extra_headers={
-                    'User-Agent': 'MeezusTerminal/1.0 (sentiment-pulse)',
-                    'Accept':     'application/json',
-                }) as resp:
+                with _http_get(
+                    f'https://api.stocktwits.com/api/2/streams/symbol/{sym}.json',
+                    timeout=10,
+                    extra_headers={'User-Agent': self.PULSE_UA, 'Accept': 'application/json'},
+                ) as resp:
                     raw = json.loads(resp.read())
                 count = 0
-                for c in raw.get('data', {}).get('children', []):
-                    d = c.get('data') or {}
-                    if d.get('stickied') or d.get('over_18'):
+                for msg in raw.get('messages', []):
+                    body = (msg.get('body') or '').strip()
+                    if not body:
                         continue
-                    title = (d.get('title') or '').strip()
-                    if not title or len(title) < 6:
+                    tag   = ((msg.get('entities') or {}).get('sentiment') or {}).get('basic')  # Bullish/Bearish/None
+                    if len(re.findall(r'\$[A-Za-z]', body)) >= 5:   # cross-posted multi-ticker spam
                         continue
-                    # For tradfi-leaning subs, only keep crypto/macro-tagged posts
-                    if weight < 0.6 and not self.PULSE_CRYPTO_RE.search(title + ' ' + (d.get('selftext') or '')):
+                    clean = re.sub(r'\$[A-Za-z.]+', '', body).strip()
+                    if not tag and len(clean) < 8:          # drop pure-cashtag noise
                         continue
                     items.append({
-                        'src':          'reddit',
-                        'sub':          sub,
-                        'title':        title,
-                        'selftext':     (d.get('selftext') or '')[:400],
-                        'score':        int(d.get('score') or 0),
-                        'comments':     int(d.get('num_comments') or 0),
-                        'upvote_ratio': float(d.get('upvote_ratio') or 0.5),
-                        'created':      int(d.get('created_utc') or 0) * 1000,
-                        'permalink':    'https://reddit.com' + (d.get('permalink') or ''),
-                        'src_weight':   weight,
+                        'src':          'social',
+                        'platform':     'stocktwits',
+                        'sub':          label,
+                        'title':        body,
+                        'selftext':     '',
+                        'score':        int((msg.get('likes') or {}).get('total') or 0),
+                        'comments':     0,
+                        'upvote_ratio': 1.0,
+                        'created':      _iso_date_ms(msg.get('created_at')),
+                        'permalink':    f'https://stocktwits.com/symbol/{sym}',
+                        'src_weight':   1.0,
+                        'tag':          tag,
                     })
                     count += 1
-                sources.append(f'r/{sub} ({count})')
+                sources.append(f'ST {label} ({count})')
             except Exception as e:
-                print(f'[MEEZUS] Pulse fetch /r/{sub} failed: {str(e)[:80]}')
+                print(f'[MEEZUS] Pulse StockTwits {sym} failed: {str(e)[:80]}')
+
+        # ── 1b. Lemmy — decentralised social, crypto communities ───────────
+        for comm in self.PULSE_LEMMY:
+            try:
+                with _http_get(
+                    f'https://lemmy.world/api/v3/post/list?community_name={comm}&limit=20&sort=Hot',
+                    timeout=10,
+                    extra_headers={'User-Agent': self.PULSE_UA, 'Accept': 'application/json'},
+                ) as resp:
+                    raw = json.loads(resp.read())
+                count = 0
+                for p in raw.get('posts', []):
+                    post  = p.get('post') or {}
+                    title = (post.get('name') or '').strip()
+                    if not title or len(title) < 6:
+                        continue
+                    counts = p.get('counts') or {}
+                    items.append({
+                        'src':          'social',
+                        'platform':     'lemmy',
+                        'sub':          'Lemmy',
+                        'title':        title,
+                        'selftext':     (post.get('body') or '')[:300],
+                        'score':        int(counts.get('score') or 0),
+                        'comments':     int(counts.get('comments') or 0),
+                        'upvote_ratio': 1.0,
+                        'created':      _iso_date_ms(post.get('published')),
+                        'permalink':    post.get('ap_id') or '',
+                        'src_weight':   0.9,
+                        'tag':          None,
+                    })
+                    count += 1
+                if count:
+                    sources.append(f'Lemmy/{comm} ({count})')
+            except Exception as e:
+                print(f'[MEEZUS] Pulse Lemmy {comm} failed: {str(e)[:80]}')
 
         # ── 2. Crypto RSS news ─────────────────────────────────────────────
         for source, url in self.CRYPTO_FEEDS:
@@ -836,16 +1204,148 @@ class MeezusHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             print(f'[MEEZUS] Pulse HN failed: {str(e)[:80]}')
 
+        # ── 5. Score every item (VADER + finance/crypto lexicon) ───────────
+        now_ms = int(now * 1000)
+        scored = 0
+        for it in items:
+            text = (it['title'] + ' ' + (it.get('selftext') or '')).strip()
+            comp, hh = _vader_compound(text)
+            # StockTwits posts carry an explicit self-tag — a high-confidence
+            # prior; anchor at ±0.6 and let the text nuance refine within band.
+            tag = it.get('tag')
+            if tag == 'Bullish':
+                comp = min(1.0,  0.6 + 0.4 * max(0.0, comp)); hh = max(hh, 1)
+            elif tag == 'Bearish':
+                comp = max(-1.0, -0.6 + 0.4 * min(0.0, comp)); hh = max(hh, 1)
+            it['compound'] = comp
+            it['hits']     = hh
+            it['entities'] = _tag_entities(text)
+            if hh > 0:
+                scored += 1
+            # recency decay (half-life PULSE_HALFLIFE_H, capped at 4 days)
+            age_h = max(0.0, (now_ms - (it.get('created') or now_ms)) / 3_600_000.0)
+            rec   = 0.5 ** (min(age_h, 96.0) / PULSE_HALFLIFE_H)
+            if it['src'] == 'social':
+                reach = math.log(max(2, it.get('score', 0) + 2)) * (it.get('upvote_ratio') or 1.0)
+            elif it['src'] == 'hn':
+                reach = math.log(max(2, it.get('score', 0) + 1)) * 0.6
+            else:                                  # curated headlines — fixed reach
+                reach = 2.0
+            it['weight'] = reach * (it.get('src_weight') or 1.0) * rec
+
+        # ── 6. Aggregate (reach × recency weighted mean of compounds) ──────
+        def _agg(subset):
+            tw = sum(x['weight'] for x in subset)
+            if tw <= 0:
+                return 0.0, len(subset)
+            return sum(x['compound'] * x['weight'] for x in subset) / tw, len(subset)
+
+        def _to100(c):
+            return int(max(-100, min(100, round(c * PULSE_SENSITIVITY))))
+
+        overall_c, total   = _agg(items)
+        social_items       = [x for x in items if x['src'] == 'social']
+        news_items         = [x for x in items if x['src'] in ('news', 'macro', 'hn')]
+        social_c, social_n = _agg(social_items)
+        news_c,   news_n   = _agg(news_items)
+
+        score100   = _to100(overall_c)
+        label, cls = _pulse_classify(score100)
+
+        # ── 7. Confidence — coverage × volume × agreement ──────────────────
+        coverage = scored / total if total else 0.0
+        volume   = min(1.0, total / 80.0)
+        comps    = [x['compound'] for x in items if x['hits'] > 0]
+        if len(comps) > 1:
+            mean = sum(comps) / len(comps)
+            std  = (sum((c - mean) ** 2 for c in comps) / len(comps)) ** 0.5
+            agreement = max(0.0, 1.0 - min(1.0, std / 0.6))
+        else:
+            agreement = 0.3
+        confidence = int(round(100 * (0.40 * coverage + 0.30 * volume + 0.30 * agreement)))
+
+        # ── 8. Topic / entity breakdown ────────────────────────────────────
+        topics = []
+        for name, _pat in _ENTITY_PATTERNS:
+            sub = [x for x in items if name in x['entities']]
+            if len(sub) >= 2:
+                c, _ = _agg(sub)
+                topics.append({'name': name, 'score': _to100(c), 'count': len(sub)})
+        topics.sort(key=lambda t: t['count'], reverse=True)
+        topics = topics[:6]
+
+        # ── 9. History + deltas (persist this reading) ─────────────────────
+        prev   = _pulse_history_load()
+        d_last = (score100 - prev[-1]['overall']) if prev else None
+        d_24   = (score100 - prev[-6]['overall']) if len(prev) >= 6 else None
+        hist   = _pulse_history_append({
+            'ts': now_ms, 'overall': score100, 'social': _to100(social_c),
+            'news': _to100(news_c), 'confidence': confidence,
+        })
+        recent   = [h['overall'] for h in hist[-6:]]
+        momentum = round((recent[-1] - recent[0]) / max(1, len(recent) - 1), 1) if len(recent) >= 2 else None
+
+        # ── 10. Divergence — intra-batch mood slope vs BTC 24h price ───────
+        dated   = [x for x in items if x['hits'] > 0 and x.get('created')]
+        rec_set = [x for x in dated if (now_ms - x['created']) / 3_600_000.0 <= 8]
+        old_set = [x for x in dated if 8 < (now_ms - x['created']) / 3_600_000.0 <= 30]
+        if len(rec_set) >= 3 and len(old_set) >= 3:
+            sent_slope = (sum(x['compound'] for x in rec_set) / len(rec_set)
+                          - sum(x['compound'] for x in old_set) / len(old_set))
+        elif momentum is not None:
+            sent_slope = momentum / 100.0
+        else:
+            sent_slope = 0.0
+        price24 = 0.0
+        try:
+            with _http_get('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1d&limit=2') as r:
+                kl = json.loads(r.read())
+            if len(kl) >= 2:
+                c_prev, c_now = float(kl[-2][4]), float(kl[-1][4])
+                price24 = (c_now - c_prev) / c_prev * 100 if c_prev else 0.0
+        except Exception as e:
+            print(f'[MEEZUS] Pulse price fetch failed: {str(e)[:80]}')
+        divergence = _pulse_divergence(price24, sent_slope)
+
+        # ── 11. Top movers ─────────────────────────────────────────────────
+        def _mover(x):
+            return {
+                'title':      x['title'][:140],
+                'url':        x.get('permalink') or '',
+                'src':        x['src'],
+                'platform':   x.get('platform') or x['src'],
+                'sub':        x.get('sub') or '',
+                'tagged':     bool(x.get('tag')),
+                'score':      int(round(x['compound'] * 100)),
+                'engagement': int(x.get('score', 0)) if x['src'] in ('social', 'hn') else 0,
+            }
+        # Movers must be on-topic (carry a crypto/macro entity) to avoid surfacing
+        # off-topic feed noise that merely trips a sentiment word.
+        movable = [x for x in items if x['hits'] > 0 and x['entities']]
+        ranked  = sorted(movable, key=lambda x: x['compound'] * x['weight'])
+        bear    = [_mover(x) for x in ranked if x['compound'] < 0][:4]
+        bull    = [_mover(x) for x in reversed(ranked) if x['compound'] > 0][:4]
+
         payload = json.dumps({
-            'items':        items,
-            'generated_at': int(now * 1000),
+            'generated_at': now_ms,
+            'overall':      {'score': score100, 'label': label, 'cls': cls, 'confidence': confidence},
+            'social':       {'score': _to100(social_c), 'count': social_n},
+            'news':         {'score': _to100(news_c),   'count': news_n},
+            'delta':        {'last': d_last, 'h24': d_24, 'momentum': momentum},
+            'history':      [{'t': h['ts'], 'v': h['overall']} for h in hist[-42:]],
+            'topics':       topics,
+            'divergence':   divergence,
+            'movers':       {'bull': bull, 'bear': bear},
             'sources':      sources,
+            'total':        total,
+            'scored':       scored,
         }).encode()
 
         with _pulse_cache_lock:
             _pulse_cache = (payload, now)
 
-        print(f'[MEEZUS] Pulse fetched: {len(items)} items from {len(sources)} sources')
+        print(f'[MEEZUS] Pulse: {score100:+d} {label} ({scored}/{total} scored, '
+              f'conf {confidence}%, {divergence["label"]})')
         self._send_raw_json(payload)
 
     # ── /api/quant ────────────────────────────────────────────────────────────────

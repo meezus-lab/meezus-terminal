@@ -90,7 +90,7 @@ local `server.py`. (The agent file is machine-specific and is git-ignored.)
 | Open Interest | Binance Futures API | 5 min |
 | Liquidation Heatmap | Binance kline + live `forceOrder` websocket | live |
 | Quant Analysis | Binance klines → server-computed indicators (RSI/MACD/EMA/BB/ATR) + narrative | 4 h |
-| Crypto Pulse | Reddit + crypto/macro RSS + Hacker News (VADER-style scoring) | 4 h |
+| Crypto Pulse | StockTwits + Lemmy (social) + crypto/macro RSS + HN (news); server-side VADER + Loughran-McDonald lexicon, 14-day trend, price-vs-mood divergence | 4 h |
 | Fear & Greed | alternative.me | 5 min |
 | BTC Dominance | CoinGecko | 5 min |
 | VIX / Put-Call | Yahoo Finance / CBOE (via proxy) | 1 min / on load |

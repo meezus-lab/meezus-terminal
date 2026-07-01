@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Meezus — Market Ops</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/gridstack@10.3.1/dist/gridstack.min.css">
-  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/style.css?v=2">
 </head>
 <body>
 
@@ -252,27 +252,6 @@
                   <button class="hm-range-btn"        data-pct="20" onclick="setHeatmapRange(20)">±20%</button>
                 </div>
                 <div class="hm-ctrl-group">
-                  <span class="hm-ctrl-lbl">Show</span>
-                  <button class="hm-mode-btn active" data-mode="unswept" onclick="setHeatmapMode('unswept')">Untaken</button>
-                  <button class="hm-mode-btn"        data-mode="all"     onclick="setHeatmapMode('all')">All</button>
-                </div>
-                <div class="hm-ctrl-group">
-                  <span class="hm-ctrl-lbl">Sensitivity</span>
-                  <div class="hm-sens" id="hm-sens">
-                    <button class="hm-sens-dot" data-v="1" onclick="setHeatmapSens(1)"></button>
-                    <button class="hm-sens-dot" data-v="2" onclick="setHeatmapSens(2)"></button>
-                    <button class="hm-sens-dot active" data-v="3" onclick="setHeatmapSens(3)"></button>
-                    <button class="hm-sens-dot" data-v="4" onclick="setHeatmapSens(4)"></button>
-                    <button class="hm-sens-dot" data-v="5" onclick="setHeatmapSens(5)"></button>
-                  </div>
-                </div>
-                <div class="hm-ctrl-group">
-                  <span class="hm-ctrl-lbl">Min Lev</span>
-                  <button class="hm-lev-btn active" data-lev="25"  onclick="setHeatmapMinLev(25)">25x</button>
-                  <button class="hm-lev-btn"        data-lev="50"  onclick="setHeatmapMinLev(50)">50x</button>
-                  <button class="hm-lev-btn"        data-lev="100" onclick="setHeatmapMinLev(100)">100x</button>
-                </div>
-                <div class="hm-ctrl-group">
                   <span class="hm-ctrl-lbl">Live Liqs</span>
                   <button class="hm-liq-btn active" data-on="true"  onclick="setHeatmapShowLiq(true)">On</button>
                   <button class="hm-liq-btn"        data-on="false" onclick="setHeatmapShowLiq(false)">Off</button>
@@ -290,41 +269,10 @@
           <div class="panel">
             <div class="panel-header">
               <span class="panel-title">Crypto Pulse</span>
-              <span class="panel-tag">Social Sentiment</span>
-              <span class="pulse-meta" id="pulse-meta"></span>
+              <span class="panel-tag">Social &amp; News Sentiment</span>
             </div>
-            <div class="panel-body no-pad pulse-body">
-              <div class="pulse-left">
-                <div class="pulse-score-row">
-                  <div class="pulse-score" id="pulse-score">··</div>
-                  <div class="pulse-label-block">
-                    <div class="pulse-label" id="pulse-label">Loading…</div>
-                    <div class="pulse-stats" id="pulse-stats">—</div>
-                  </div>
-                </div>
-                <div class="pulse-bar">
-                  <div class="pulse-bar-track">
-                    <div class="pulse-bar-mid"></div>
-                    <div class="pulse-bar-fill" id="pulse-bar-fill"></div>
-                    <div class="pulse-bar-needle" id="pulse-bar-needle"></div>
-                  </div>
-                  <div class="pulse-bar-scale">
-                    <span class="pulse-bar-end neg">−100</span>
-                    <span class="pulse-bar-zero">0</span>
-                    <span class="pulse-bar-end pos">+100</span>
-                  </div>
-                </div>
-              </div>
-              <div class="pulse-right">
-                <div class="pulse-col">
-                  <div class="pulse-col-head pos">▲ Most Bullish</div>
-                  <div class="pulse-col-list" id="pulse-bull-list"></div>
-                </div>
-                <div class="pulse-col">
-                  <div class="pulse-col-head neg">▼ Most Bearish</div>
-                  <div class="pulse-col-list" id="pulse-bear-list"></div>
-                </div>
-              </div>
+            <div class="panel-body no-pad pulse-body" id="pulse-body">
+              <div class="pulse-loading">Reading the tape…</div>
             </div>
           </div>
         </div>
@@ -641,8 +589,8 @@
   </div><!-- /grid-wrapper -->
 
   <script src="https://cdn.jsdelivr.net/npm/gridstack@10.3.1/dist/gridstack-all.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest/dist/hls.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.6.16/dist/hls.min.js"></script>
   <script src="config.js"></script>
-  <script src="js/dashboard.js"></script>
+  <script src="js/dashboard.js?v=2"></script>
 </body>
 </html>

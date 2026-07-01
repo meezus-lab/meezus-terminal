@@ -148,7 +148,10 @@ function setupCanvas(canvas) {
   if (!canvas) return null;
   const W = canvas.offsetWidth, H = canvas.offsetHeight;
   if (!W || !H) return null;
-  const dpr = window.devicePixelRatio || 1;
+  // Cap DPR at 1.5: on a retina (dpr 2) display this cuts every canvas backing
+  // store by ~44% (bytes scale with dpr²) for imperceptible softening of axis
+  // text/lines — the heatmap image is already bilinear-upscaled from a small grid.
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
   if (canvas.width !== W * dpr || canvas.height !== H * dpr) {
     canvas.width  = W * dpr;
     canvas.height = H * dpr;
@@ -725,10 +728,19 @@ async function initStream(asset) {
     }
 
     const hls = new Hls({
-      enableWorker:         true,
-      lowLatencyMode:       true,
-      liveSyncDurationCount: 3,
+      enableWorker:                true,
+      lowLatencyMode:              true,
+      liveSyncDurationCount:       3,
       liveMaxLatencyDurationCount: 6,
+      // ── RAM caps (resolution stays full 1080p — chosen server-side) ───────
+      // Bound the MSE SourceBuffer so a 24/7 live stream can't grow toward the
+      // 60 MB/stream default, and drop already-played segments. This is the
+      // video-memory saving that survives at full quality, alongside the
+      // backgrounded-tab teardown below.
+      maxBufferLength:             10,               // forward target (s); default 30
+      maxMaxBufferLength:          30,               // hard cap (s); default up to 600
+      maxBufferSize:               20 * 1000 * 1000, // ~20 MB/stream; default 60 MB
+      backBufferLength:            0,                // evict played segments (live monitor never seeks back)
     });
     _hlsInstances[asset] = hls;
 
@@ -779,6 +791,42 @@ function loadStreams() {
   initStream('btc');
   initStream('eth');
 }
+
+// ── Reclaim video RAM while the tab is backgrounded ──────────────────────────
+// A hidden dashboard doesn't need live video. hls.destroy() (not video.pause())
+// frees the MSE SourceBuffers + decoder surfaces — the tab's dominant footprint.
+// On return we rebuild via initStream (fresh, unexpired URL + live edge). Streams
+// stay warm while merely scrolled off-screen (per user preference).
+let _streamsPaused = false;
+
+function _teardownStreams() {
+  ['btc', 'eth'].forEach(asset => {
+    clearTimeout(_retryTimers[asset]);   // stop any pending retry firing while hidden
+    delete _retryTimers[asset];
+    if (_hlsInstances[asset]) {
+      try { _hlsInstances[asset].destroy(); } catch (_) {}
+      delete _hlsInstances[asset];
+    }
+    const video = $(`${asset}-stream-video`);
+    if (video) { try { video.pause(); video.removeAttribute('src'); video.load(); } catch (_) {} }
+    const overlay = $(`${asset}-stream-overlay`);
+    const msg     = $(`${asset}-stream-msg`);
+    const dot     = $(`${asset}-stream-dot`);
+    if (overlay) overlay.style.display = '';
+    if (msg)     msg.textContent = 'Paused — tab in background';
+    if (dot)   { dot.style.background = 'var(--text-faint)'; dot.classList.remove('blink'); }
+  });
+  _streamsPaused = true;
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    _teardownStreams();
+  } else if (_streamsPaused) {
+    _streamsPaused = false;
+    loadStreams();   // initStream destroys-first, so re-entry is safe
+  }
+});
 
 // ─── TradFi panel (Binance Futures) ──────────────────────────────────────────
 const TRADFI_ASSETS = [
@@ -963,10 +1011,10 @@ let _hmTF     = '1h';
 let _hmKlines = null;
 let _hmReqId  = 0;   // race-guard: drop stale fetches
 
-// User controls
-let _hmMode    = 'unswept';   // 'unswept' | 'all'
-let _hmSens    = 3;           // 1..5  (3 = neutral)
-let _hmMinLev  = 25;          // show only tiers ≥ this leverage
+// User control — only the live-liquidation overlay toggle remains. The model
+// now uses fixed CoinGlass-style defaults: all 25–125x tiers, neutral
+// normalisation, and bands drawn from open → sweep point (or → now if still
+// untaken) so clustered levels accumulate into clean horizontal shelves.
 let _hmShowLiq = true;        // overlay real liquidation events
 
 // ── Live liquidation feed ──────────────────────────────────────────────────
@@ -1173,22 +1221,28 @@ function _hmDrawCursor() {
   ctx.stroke();
   ctx.restore();
 
-  // ── Price pill at cursor ──────────────────────────────────────────────
+  // Liquidation intensity at the hovered price level (0..100 of the hottest row)
+  let liqPct = 0;
+  if (vp.rowInt && vp.NY) {
+    const yi = Math.round((price - vp.pLo) / (vp.pHi - vp.pLo) * (vp.NY - 1));
+    if (yi >= 0 && yi < vp.NY) liqPct = Math.round(vp.rowInt[yi] * 100);
+  }
+
+  // ── Price + intensity pill at cursor (two lines) ──────────────────────
   const sign     = pct >= 0 ? '+' : '';
   const priceStr = _hmPriceLabel(price, vp.pHi - vp.pLo);
   const pctStr   = `${sign}${pct.toFixed(Math.abs(pct) < 1 ? 2 : 1)}%`;
-  const text     = `${priceStr}  ${pctStr}`;
 
   ctx.font = `600 11px ${sysFont}`;
-  const textW = ctx.measureText(text).width;
-  const pillW = textW + 14;
-  const pillH = 20;
-  // Flip side if too close to right edge
+  const line1W  = ctx.measureText(`${priceStr}  ${pctStr}`).width;
+  const barMaxW = 46;
+  const pillW   = Math.max(line1W, 22 + barMaxW + 30) + 14;
+  const pillH   = 34;
   const flip  = (mx + 12 + pillW) > (vp.PAD.l + vp.plotW);
   const pillX = flip ? (mx - 12 - pillW) : (mx + 12);
   const pillY = Math.max(vp.PAD.t + 1, Math.min(vp.PAD.t + vp.plotH - pillH - 1, my - pillH / 2));
 
-  ctx.fillStyle   = 'rgba(10,4,25,0.94)';
+  ctx.fillStyle   = 'rgba(10,4,25,0.95)';
   ctx.strokeStyle = pct > 0 ? 'rgba(48,217,123,0.7)' : pct < 0 ? 'rgba(255,69,58,0.7)' : 'rgba(100,210,255,0.7)';
   ctx.lineWidth   = 1;
   if (ctx.roundRect) {
@@ -1198,14 +1252,34 @@ function _hmDrawCursor() {
     ctx.fillRect(pillX, pillY, pillW, pillH);
   }
 
-  // Two-tone text: price in white, % in directional color
-  ctx.textAlign    = 'left';
+  // Line 1 — price (white) + % (directional)
+  ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
-  ctx.fillStyle    = '#fff';
-  ctx.fillText(priceStr, pillX + 7, pillY + pillH / 2);
+  const ly1 = pillY + 11;
+  ctx.font = `600 11px ${sysFont}`;
+  ctx.fillStyle = '#fff';
+  ctx.fillText(priceStr, pillX + 7, ly1);
   const priceW = ctx.measureText(priceStr).width;
   ctx.fillStyle = pct > 0 ? '#30d97b' : pct < 0 ? '#ff453a' : '#64d2ff';
-  ctx.fillText('  ' + pctStr, pillX + 7 + priceW, pillY + pillH / 2);
+  ctx.fillText('  ' + pctStr, pillX + 7 + priceW, ly1);
+
+  // Line 2 — liquidation-intensity mini-bar (uses the heat colormap)
+  const ly2  = pillY + 24;
+  const barX = pillX + 7 + 22;
+  const barY = ly2 - 3;
+  ctx.font = `600 8.5px ${sysFont}`;
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.fillText('LIQ', pillX + 7, ly2);
+  ctx.fillStyle = 'rgba(255,255,255,0.10)';
+  if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(barX, barY, barMaxW, 6, 3); ctx.fill(); }
+  else ctx.fillRect(barX, barY, barMaxW, 6);
+  const [cr, cg, cb] = _hmColor(0.1 + (liqPct / 100) * 0.9);
+  ctx.fillStyle = `rgb(${cr},${cg},${cb})`;
+  const fillW = Math.max(2, barMaxW * liqPct / 100);
+  if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(barX, barY, fillW, 6, 3); ctx.fill(); }
+  else ctx.fillRect(barX, barY, fillW, 6);
+  ctx.fillStyle = 'rgba(255,255,255,0.8)';
+  ctx.fillText(`${liqPct}%`, barX + barMaxW + 5, ly2);
 
   // ── Time pill below cursor on X axis ──────────────────────────────────
   const d = new Date(ts);
@@ -1319,25 +1393,6 @@ function _hmAttachInteractions() {
 
 function setHeatmapResetView() { _hmResetView(); }
 
-function setHeatmapMode(mode) {
-  _hmMode = mode;
-  document.querySelectorAll('.hm-mode-btn').forEach(b =>
-    b.classList.toggle('active', b.dataset.mode === mode));
-  _renderHeatmap();
-}
-function setHeatmapSens(v) {
-  _hmSens = v;
-  document.querySelectorAll('.hm-sens-dot').forEach(b =>
-    b.classList.toggle('active', +b.dataset.v === v));
-  _renderHeatmap();
-}
-function setHeatmapMinLev(L) {
-  _hmMinLev = L;
-  document.querySelectorAll('.hm-lev-btn').forEach(b =>
-    b.classList.toggle('active', +b.dataset.lev === L));
-  _renderHeatmap();
-}
-
 function setHeatmapCoin(coin) {
   _hmSymbol = coin === 'ETH' ? 'ETHUSDT' : 'BTCUSDT';
   setActiveCoinBtn('hm', coin);
@@ -1386,19 +1441,20 @@ async function fetchHeatmap() {
   }
 }
 
-// Coinglass-style colormap: deep magenta → magenta-pink → orange → yellow → white-hot
-// Higher contrast, brighter mid-tones, clearer hot zones.
+// CoinGlass thermal colormap: dark navy → indigo → blue → cyan → green → yellow
+// → white-hot. Brightness reads as cluster magnitude (biggest = yellow-white).
 function _hmColor(t) {
   t = Math.max(0, Math.min(1, t));
   const stops = [
-    [0.00, [ 20,   0,  40,   0]],   // transparent
-    [0.08, [ 50,   5,  90, 110]],   // deep magenta-purple
-    [0.22, [110,  15, 140, 175]],   // magenta
-    [0.40, [180,  30, 130, 210]],   // pink
-    [0.58, [220,  70,  90, 230]],   // pink-red
-    [0.74, [240, 140,  50, 245]],   // orange
-    [0.88, [255, 215,  60, 255]],   // gold
-    [1.00, [255, 255, 200, 255]],   // white-hot
+    [0.00, [ 12,  10,  35,   0]],   // transparent dark navy
+    [0.10, [ 35,  25,  85, 120]],   // deep indigo
+    [0.26, [ 45,  55, 150, 180]],   // blue
+    [0.42, [ 30, 110, 190, 205]],   // azure
+    [0.56, [ 25, 175, 165, 225]],   // teal-cyan
+    [0.70, [ 70, 205,  95, 240]],   // green
+    [0.83, [205, 220,  55, 250]],   // chartreuse-yellow
+    [0.93, [255, 205,  45, 255]],   // amber
+    [1.00, [255, 255, 230, 255]],   // white-hot
   ];
   for (let i = 0; i < stops.length - 1; i++) {
     const [t0, c0] = stops[i], [t1, c1] = stops[i + 1];
@@ -1426,7 +1482,7 @@ function _renderHeatmap() {
   ctx.fillStyle = '#0a0419';
   ctx.fillRect(0, 0, W, H);
 
-  const PAD   = { l: 64, r: 52, t: 12, b: 28 };
+  const PAD   = { l: 64, r: 74, t: 12, b: 28 };
   const plotW = W - PAD.l - PAD.r;
   const plotH = H - PAD.t - PAD.b;
   if (plotW < 40 || plotH < 40) return;
@@ -1462,106 +1518,83 @@ function _renderHeatmap() {
   const NY = Math.max(140, Math.min(480, Math.floor(plotH / 1.2)));
   const grid = new Float32Array(NX * NY);
 
-  // ── Accumulate liquidation pressure (with sweep filtering) ──────────────
-  const holdSpan      = cfg.holdScale;
-  const unsweptOnly   = _hmMode === 'unswept';
-  const activeTiers   = HM_LEV_TIERS.filter(t => t.L >= _hmMinLev);
-  const colsPerCandle = Math.max(1, NX / N);
-  // In "unswept" mode positions are still live → much slower decay (or none).
-  // In "all" mode we use the full per-TF decay.
-  const decayK = unsweptOnly ? 0.05 : (1 / (holdSpan * colsPerCandle));
-
+  // ── Accumulate liquidation shelves (CoinGlass-style) ────────────────────
+  // Each candle seeds long & short liquidation levels for every leverage tier.
+  // A level's band runs from that candle's time forward until price first
+  // crosses it (liquidity "swept"/taken) — or all the way to the right edge
+  // (now) if still untaken. Overlapping levels SUM, so clustered prices build
+  // into bright horizontal shelves; untaken clusters stretch through to now.
+  const activeTiers = HM_LEV_TIERS;
   for (let ci = 0; ci < N; ci++) {
-    const c = k[ci];
+    const c     = k[ci];
     const entry = (c.high + c.low + c.close) / 3;
     const ti    = Math.floor((c.ts - tStart) / tSpan * (NX - 1));
 
     for (const tier of activeTiers) {
-      const L = tier.L, w = tier.w;
-      const longLiq  = entry * (1 - 1 / L + HM_MMR);
-      const shortLiq = entry * (1 + 1 / L - HM_MMR);
+      const L = tier.L, base = c.vol * tier.w;
 
-      const longSwept  = unsweptOnly && longLiq  >= futureLow[ci];
-      const shortSwept = unsweptOnly && shortLiq <= futureHigh[ci];
-
-      // Long band
-      if (!longSwept && longLiq >= pLo && longLiq <= pHi) {
-        const yi   = Math.round((longLiq - pLo) / pRange * (NY - 1));
-        const base = c.vol * w;
-        const xEnd = unsweptOnly ? NX : Math.min(NX, ti + Math.floor(holdSpan * colsPerCandle) + 6);
-        for (let xi = ti; xi < xEnd; xi++) {
-          const dx = xi - ti;
-          grid[yi * NX + xi] += base * Math.exp(-dx * decayK);
+      // Long level (below price) — swept when a later low reaches down to it
+      const longLiq = entry * (1 - 1 / L + HM_MMR);
+      if (longLiq >= pLo && longLiq <= pHi) {
+        let xEnd = NX;
+        if (longLiq >= futureLow[ci]) {            // gets taken at some point
+          for (let j = ci + 1; j < N; j++) {
+            if (k[j].low <= longLiq) { xEnd = Math.floor((k[j].ts - tStart) / tSpan * (NX - 1)); break; }
+          }
         }
+        const row = Math.round((longLiq - pLo) / pRange * (NY - 1)) * NX;
+        for (let xi = ti; xi < xEnd; xi++) grid[row + xi] += base;
       }
-      // Short band
-      if (!shortSwept && shortLiq >= pLo && shortLiq <= pHi) {
-        const yi   = Math.round((shortLiq - pLo) / pRange * (NY - 1));
-        const base = c.vol * w;
-        const xEnd = unsweptOnly ? NX : Math.min(NX, ti + Math.floor(holdSpan * colsPerCandle) + 6);
-        for (let xi = ti; xi < xEnd; xi++) {
-          const dx = xi - ti;
-          grid[yi * NX + xi] += base * Math.exp(-dx * decayK);
+
+      // Short level (above price) — swept when a later high reaches up to it
+      const shortLiq = entry * (1 + 1 / L - HM_MMR);
+      if (shortLiq >= pLo && shortLiq <= pHi) {
+        let xEnd = NX;
+        if (shortLiq <= futureHigh[ci]) {          // gets taken at some point
+          for (let j = ci + 1; j < N; j++) {
+            if (k[j].high >= shortLiq) { xEnd = Math.floor((k[j].ts - tStart) / tSpan * (NX - 1)); break; }
+          }
         }
+        const row = Math.round((shortLiq - pLo) / pRange * (NY - 1)) * NX;
+        for (let xi = ti; xi < xEnd; xi++) grid[row + xi] += base;
       }
     }
   }
 
-  // ── Tight 3-tap vertical thickener: bands stay SHARP but visible ────────
-  // Replaces previous heavy blur. Bands now look like clean Coinglass stripes
-  // instead of fuzzy clouds.
+  // ── Tight 3-tap vertical thickener: keeps shelves sharp but visible ──────
   const blurred = new Float32Array(grid.length);
   const K = [0.22, 0.56, 0.22];
   for (let xi = 0; xi < NX; xi++) {
     for (let yi = 0; yi < NY; yi++) {
-      let s = 0;
-      for (let d = -1; d <= 1; d++) {
-        const y2 = yi + d;
-        if (y2 < 0 || y2 >= NY) continue;
-        s += grid[y2 * NX + xi] * K[d + 1];
-      }
+      let s = grid[yi * NX + xi] * K[1];
+      if (yi > 0)      s += grid[(yi - 1) * NX + xi] * K[0];
+      if (yi < NY - 1) s += grid[(yi + 1) * NX + xi] * K[2];
       blurred[yi * NX + xi] = s;
     }
   }
 
-  // Normalize: sensitivity adjusts the percentile clip point.
-  // sens=1 (least)  → clip at 99th percentile (only the hottest stuff lights up)
-  // sens=5 (most)   → clip at 80th percentile (faint pools also visible)
-  const sensPct = [0.99, 0.95, 0.90, 0.85, 0.78][_hmSens - 1] ?? 0.90;
+  // ── Normalize against a fixed high percentile (neutral sensitivity) ──────
   const nonzero = [];
   for (let i = 0; i < blurred.length; i++) if (blurred[i] > 0) nonzero.push(blurred[i]);
   if (!nonzero.length) {
-    _drawHmStatus(unsweptOnly ? 'All clusters swept · try "All" mode' : 'No liquidation data in range');
+    _drawHmStatus('No liquidation levels in range · widen Range');
     return;
   }
   nonzero.sort((a, b) => a - b);
-  const pNorm = nonzero[Math.floor(nonzero.length * sensPct)] || 1;
+  const pNorm = nonzero[Math.floor(nonzero.length * 0.92)] || 1;
 
-  // ── Detect top clusters for right-edge labels ───────────────────────────
-  // Sum intensity per row; pick top 5 local maxima with min-distance separation.
+  // ── Per-price intensity profile (drives the hover read-out) ─────────────
   const rowSum = new Float32Array(NY);
+  let rowMax = 0;
   for (let yi = 0; yi < NY; yi++) {
     let s = 0;
     for (let xi = 0; xi < NX; xi++) s += blurred[yi * NX + xi];
     rowSum[yi] = s;
+    if (s > rowMax) rowMax = s;
   }
-  const rowMax = Math.max(...rowSum);
-  const minDist = Math.max(5, Math.floor(NY * 0.03));   // ~3% of height apart
-  const peaks = [];
-  for (let yi = 1; yi < NY - 1; yi++) {
-    if (rowSum[yi] < rowMax * 0.18) continue;
-    if (rowSum[yi] <= rowSum[yi - 1] || rowSum[yi] <= rowSum[yi + 1]) continue;
-    if (peaks.some(p => Math.abs(p.yi - yi) < minDist)) continue;
-    peaks.push({ yi, intensity: rowSum[yi] });
-  }
-  peaks.sort((a, b) => b.intensity - a.intensity);
-  const topPeaks = peaks.slice(0, 5);
-  topPeaks.forEach(p => {
-    p.price = pLo + (p.yi / (NY - 1)) * pRange;
-    p.score = p.intensity / rowMax;   // 0..1
-  });
+  const rowInt = new Float32Array(NY);
+  if (rowMax > 0) for (let yi = 0; yi < NY; yi++) rowInt[yi] = rowSum[yi] / rowMax;
 
-  // Use blurred grid going forward
   const final = blurred;
   const p95 = pNorm;
 
@@ -1622,23 +1655,20 @@ function _renderHeatmap() {
   ctx.stroke();
   ctx.restore();
 
-  // ── Price line over time (white, soft glow) ─────────────────────────────
+  // ── Price line over time (thin, crisp — CoinGlass keeps this understated) ─
   ctx.beginPath();
   for (let i = 0; i < N; i++) {
     const x = toX(k[i].ts), y = toY(k[i].close);
     i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
   }
-  ctx.shadowColor = 'rgba(255,255,255,0.5)';
-  ctx.shadowBlur  = 4;
-  ctx.strokeStyle = '#ffffff';
-  ctx.lineWidth   = 1.4;
+  ctx.strokeStyle = 'rgba(255,255,255,0.92)';
+  ctx.lineWidth   = 1;
   ctx.lineJoin    = 'round';
   ctx.stroke();
-  ctx.shadowBlur = 0;
 
   // Current price dot
   ctx.beginPath();
-  ctx.arc(toX(last.ts), cy, 4, 0, Math.PI * 2);
+  ctx.arc(toX(last.ts), cy, 3.2, 0, Math.PI * 2);
   ctx.fillStyle   = '#ffffff';
   ctx.fill();
   ctx.strokeStyle = '#0a0419';
@@ -1704,70 +1734,40 @@ function _renderHeatmap() {
     ctx.fillText(label, x, PAD.t + plotH + 6);
   });
 
-  // ── Legend (top-left, very subtle) ─────────────────────────────────────
+  // ── Legend (top-left, subtle) ──────────────────────────────────────────
   ctx.font         = `9px ${sysFont}`;
-  ctx.fillStyle    = 'rgba(255,255,255,0.4)';
+  ctx.fillStyle    = 'rgba(255,255,255,0.42)';
   ctx.textAlign    = 'left';
   ctx.textBaseline = 'top';
-  const modeLbl = unsweptOnly ? 'Untaken' : 'All';
-  ctx.fillText(`${cfg.label} · ${_hmSymbol.replace('USDT','')} · ${_hmMinLev}–125x · ${modeLbl}`, PAD.l + 4, PAD.t + 4);
+  ctx.fillText(`${cfg.label} · ${_hmSymbol.replace('USDT','')} · 25–125× liq levels`, PAD.l + 4, PAD.t + 4);
 
-  // ── Top "magnet" cluster pills ─────────────────────────────────────────
-  // Pinned inside the right edge of the plot — show price + %ΔFromPrice +
-  // intensity bar. Sorted by intensity, de-overlapped by Y.
-  if (topPeaks.length) {
-    ctx.font         = `600 10px ${sysFont}`;
-    ctx.textAlign    = 'left';
-    ctx.textBaseline = 'middle';
-    const labelW = 92;
-    const xLbl   = PAD.l + plotW - labelW - 4;
-
-    const labels = topPeaks.map(p => ({
-      ...p,
-      pct:     ((p.price - cp) / cp) * 100,
-      y:       toY(p.price),
-      desired: toY(p.price),
-    })).sort((a, b) => a.y - b.y);
-
-    const minGap = 18;
-    for (let i = 1; i < labels.length; i++) {
-      if (labels[i].y - labels[i - 1].y < minGap) labels[i].y = labels[i - 1].y + minGap;
+  // ── Vertical colorbar legend (right gutter) — CoinGlass signature ───────
+  {
+    const cbW   = 7;
+    const cbX   = W - cbW - 6;
+    const cbTop = PAD.t + 12;
+    const cbBot = PAD.t + plotH - 4;
+    const cbH   = cbBot - cbTop;
+    if (cbH > 30) {
+      const steps = 26;
+      for (let s = 0; s < steps; s++) {
+        const tt = s / (steps - 1);                       // 0 (low) → 1 (high)
+        const yy = cbBot - (s + 1) * (cbH / steps);
+        const [r, g, b] = _hmColor(0.05 + tt * 0.95);
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        ctx.fillRect(cbX, yy, cbW, cbH / steps + 0.8);
+      }
+      ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+      ctx.lineWidth   = 0.5;
+      ctx.strokeRect(cbX, cbTop, cbW, cbH);
+      ctx.font         = `8px ${sysFont}`;
+      ctx.fillStyle    = 'rgba(255,255,255,0.55)';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText('Hi', cbX + cbW / 2, cbTop - 2);
+      ctx.textBaseline = 'top';
+      ctx.fillText('Lo', cbX + cbW / 2, cbBot + 2);
     }
-    for (let i = labels.length - 2; i >= 0; i--) {
-      if (labels[i + 1].y - labels[i].y < minGap) labels[i].y = labels[i + 1].y - minGap;
-    }
-
-    labels.forEach(p => {
-      const x = xLbl;
-      // Leader line back to the actual band
-      ctx.strokeStyle = `rgba(255,235,140,${0.20 + p.score * 0.55})`;
-      ctx.lineWidth   = 0.7;
-      ctx.beginPath();
-      ctx.moveTo(PAD.l + 2, p.desired);
-      ctx.lineTo(x - 2, p.y);
-      ctx.stroke();
-
-      // Pill bg
-      const bgAlpha = 0.6 + p.score * 0.3;
-      ctx.fillStyle = `rgba(20,5,30,${bgAlpha})`;
-      if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(x, p.y - 8, labelW, 16, 4); ctx.fill(); }
-      else               { ctx.fillRect(x, p.y - 8, labelW, 16); }
-
-      // Intensity bar (gradient from hot orange → bright yellow)
-      const barW = Math.round(labelW * Math.min(1, p.score));
-      const grad = ctx.createLinearGradient(x, 0, x + labelW, 0);
-      grad.addColorStop(0, 'rgba(255,140,40,0.65)');
-      grad.addColorStop(1, 'rgba(255,235,80,0.85)');
-      ctx.fillStyle = grad;
-      if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(x, p.y - 8, barW, 16, 4); ctx.fill(); }
-      else               { ctx.fillRect(x, p.y - 8, barW, 16); }
-
-      // Text: price + % offset from current
-      const sign = p.pct >= 0 ? '+' : '';
-      const pctStr = `${sign}${p.pct.toFixed(Math.abs(p.pct) < 1 ? 2 : 1)}%`;
-      ctx.fillStyle = '#ffffff';
-      ctx.fillText(`${_hmPriceLabel(p.price, pRange)}  ${pctStr}`, x + 5, p.y);
-    });
   }
 
   // ── Real liquidation events overlay ────────────────────────────────────
@@ -1810,8 +1810,8 @@ function _renderHeatmap() {
     }
   }
 
-  // Cache the geometry the cursor overlay needs to map mouse → price/time
-  _hmViewport = { PAD, plotW, plotH, W, H, pLo, pHi, tStart, tEnd, cp };
+  // Cache the geometry + intensity profile the cursor overlay needs
+  _hmViewport = { PAD, plotW, plotH, W, H, pLo, pHi, tStart, tEnd, cp, rowInt, NY };
   // Redraw cursor over the fresh heatmap (in case it was on-screen during render)
   _hmScheduleCursor();
 }
@@ -2795,268 +2795,188 @@ function initOI() {
   }
 }
 
-// ─── Crypto Pulse (social sentiment) ──────────────────────────────────────────
-// Methodology (VADER-inspired, adapted for crypto):
-//   1. Server pulls Reddit hot posts from r/CryptoCurrency, r/Bitcoin,
-//      r/CryptoMarkets.
-//   2. We score each post's title+body with a crypto-aware lexicon, normalize
-//      to [-1, +1] with a softmax-like compound, then weight by reach
-//      (log(upvotes) * upvote_ratio).
-//   3. Aggregate to a single -100..+100 market score, classify, and surface
-//      the most-bullish / most-bearish posts.
-
-// ~180 keywords tuned for crypto-Twitter / Reddit vocabulary.
-const PULSE_LEX = {
-  // Bullish — crypto-specific
-  moon: 4, mooning: 4, lambo: 3, ath: 3, breakout: 3, breakouts: 3,
-  pump: 3, pumping: 3, pumped: 2, rally: 3, rallies: 3, rallying: 3,
-  surge: 3, surging: 3, surged: 3, soar: 3, soaring: 3, soared: 3,
-  parabolic: 4, vertical: 2, melts: -2, melt: -1,
-  bullish: 3, bull: 2, bulls: 2, bullrun: 4, supercycle: 3,
-  long: 1, longs: 1, longing: 1, longed: 1,
-  hodl: 1, hodling: 1, accumulate: 2, accumulating: 2, stacking: 2, stack: 1,
-  buy: 1, buying: 1, bought: 1, buyers: 1,
-  green: 1, gain: 1, gains: 2, gaining: 2, profit: 2, profits: 2, profitable: 2,
-  win: 1, wins: 1, winning: 1, winner: 2, winners: 2, victory: 2,
-  adoption: 3, adopting: 2, mainstream: 2, institutional: 2,
-  etf: 2, approval: 2, approved: 3, breakthrough: 3, milestone: 2,
-  upside: 2, upgrade: 2, upgraded: 2, halving: 2, halved: 1,
-  recovery: 2, rebound: 2, reversal: 1, bounce: 2, bouncing: 2,
-  support: 1, supported: 1, accumulation: 2, oversold: 1,
-  rocket: 3, gem: 2, alpha: 2, beats: 1, beat: 1, beating: 1, beats: 1,
-  innovative: 2, revolutionary: 3, disruptive: 2, growth: 2, growing: 1,
-  surging: 3, exploded: 3, exploding: 3, blast: 2, blasting: 2,
-  optimistic: 2, optimism: 2, hopeful: 1, confident: 2,
-
-  // Bearish — crypto-specific
-  crash: -4, crashing: -4, crashed: -4, plunge: -4, plunged: -4, plunging: -4,
-  collapse: -5, collapsed: -5, collapsing: -5, meltdown: -4,
-  dump: -3, dumping: -3, dumped: -3, tank: -3, tanking: -3, tanked: -3,
-  bearish: -3, bear: -2, bears: -2, bearmarket: -4,
-  short: -1, shorts: -1, shorting: -1, shorted: -1,
-  liquidated: -3, liquidation: -3, liquidations: -3, liq: -2, liqs: -2,
-  rekt: -3, capitulation: -4, capitulate: -4, capitulating: -4,
-  rug: -4, rugged: -4, rugpull: -5, scam: -4, ponzi: -4, fraud: -4,
-  hack: -3, hacked: -3, exploit: -3, exploited: -3, breach: -3,
-  fud: -2, fear: -2, panic: -3, panicking: -3, crisis: -3,
-  sell: -1, sells: -1, selling: -2, sold: -1, sellers: -1, dumping: -3,
-  red: -1, loss: -2, losses: -2, losing: -2, loser: -2, losers: -2,
-  drop: -2, dropped: -2, dropping: -2, decline: -2, declined: -2, declining: -2,
-  falling: -2, fell: -2, fallen: -2, down: -1, downtrend: -2, downside: -2,
-  resistance: -1, overbought: -2, bubble: -2, burst: -2, popped: -2,
-  worthless: -4, dying: -3, dead: -3, doomed: -3, doom: -3, bleeding: -2,
-  bagholder: -2, bagholders: -2, holding: 0, stuck: -1,
-  warning: -1, warnings: -1, danger: -2, dangerous: -2, risk: -1, risky: -2,
-  pessimistic: -2, bearish: -3, doubt: -1, doubts: -1, uncertain: -1,
-  regulation: -1, ban: -3, banned: -3, restriction: -2, restrictive: -2,
-
-  // General sentiment lifts/dampers
-  great: 2, amazing: 3, awesome: 3, excellent: 3, fantastic: 3, brilliant: 3,
-  best: 2, better: 1, good: 1, solid: 1, strong: 2, stronger: 2, strongest: 3,
-  perfect: 3, incredible: 3, fire: 2, lit: 2, based: 1,
-  bad: -1, terrible: -3, awful: -3, horrible: -3, worst: -3, worse: -2,
-  weak: -2, weaker: -2, weakest: -3, poor: -1, fail: -2, failing: -2, failed: -2,
-  pathetic: -3, joke: -2, garbage: -3, trash: -3, shit: -2, shitty: -2,
-  bs: -2, lol: 0, lmao: 0,
-};
-
-// Negators flip the next token's contribution
-const PULSE_NEGATORS = new Set([
-  "not", "no", "never", "none", "nothing", "neither", "nor", "without",
-  "isn", "isnt", "wasn", "wasnt", "aren", "arent", "weren", "werent",
-  "don", "dont", "doesn", "doesnt", "didn", "didnt",
-  "won", "wont", "wouldn", "wouldnt", "couldn", "couldnt", "shouldn", "shouldnt",
-]);
-
-function _pulseScoreText(text) {
-  if (!text) return { score: 0, hits: 0 };
-  const allCapsRuns = (text.match(/\b[A-Z]{2,}\b/g) || []).length;
-  const exclaims    = (text.match(/!/g) || []).length;
-  const intensity   = 1 + Math.min(0.6, allCapsRuns * 0.06 + exclaims * 0.08);
-
-  const tokens = text.toLowerCase().replace(/[’']/g, '').match(/[a-z]+/g) || [];
-  let sum = 0, hits = 0, negate = false, negateLife = 0;
-
-  for (const t of tokens) {
-    if (PULSE_NEGATORS.has(t)) { negate = true; negateLife = 3; continue; }
-    const v = PULSE_LEX[t];
-    if (v !== undefined) {
-      sum += (negate ? -v * 0.6 : v) * intensity;
-      hits++;
-      negate = false;
-    }
-    if (negate && --negateLife <= 0) negate = false;
-  }
-  return { score: sum, hits, intensity };
-}
-
-// VADER-style normalization: maps any real score onto [-1, +1] using
-//   compound = score / sqrt(score² + α)        — α=15 is the VADER default
-function _pulseCompound(rawScore, alpha = 15) {
-  return rawScore / Math.sqrt(rawScore * rawScore + alpha);
-}
-
-function _pulseClassify(s) {
-  if (s >=  60) return { lbl: 'Euphoria',     cls: 'pulse-euphoria' };
-  if (s >=  25) return { lbl: 'Bullish',      cls: 'pulse-bullish'  };
-  if (s >=  10) return { lbl: 'Mild Bullish', cls: 'pulse-mild-bullish' };
-  if (s >  -10) return { lbl: 'Neutral',      cls: 'pulse-neutral'  };
-  if (s >  -25) return { lbl: 'Mild Bearish', cls: 'pulse-mild-bearish' };
-  if (s >  -60) return { lbl: 'Bearish',      cls: 'pulse-bearish'  };
-                return { lbl: 'Capitulation', cls: 'pulse-capitulation' };
-}
+// ─── Crypto Pulse (social + news sentiment) ───────────────────────────────────
+// Scoring now happens entirely server-side (/api/sentiment): a VADER
+// implementation over a merged finance (Loughran-McDonald) + crypto lexicon
+// scores StockTwits, Lemmy, crypto RSS, tradfi RSS and HN. The server returns a
+// fully-computed payload — overall / social / news indices, a 14-day trend,
+// a price-vs-mood divergence read, a topic breakdown and movers — so the client
+// is pure rendering.
 
 function _pulseTimeAgo(ms) {
   const s = Math.floor((Date.now() - ms) / 1000);
-  if (s < 60)      return `${s}s ago`;
-  if (s < 3600)    return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400)   return `${Math.floor(s / 3600)}h ago`;
+  if (s < 60)    return `${s}s ago`;
+  if (s < 3600)  return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
   return `${Math.floor(s / 86400)}d ago`;
 }
 
+function _signed(n) { return (n > 0 ? '+' : '') + n; }
+
+// Inline sparkline SVG from the sentiment history (values -100..+100).
+function _pulseSparkline(history) {
+  if (!history || history.length < 2) {
+    return `<div class="pulse-spark-empty">building trend history — first points land every 4h</div>`;
+  }
+  const W = 100, H = 30, pad = 3;
+  const vals = history.map(p => p.v);
+  const n = vals.length;
+  const x = i => pad + (i / (n - 1)) * (W - 2 * pad);
+  const y = v => H - pad - ((v + 100) / 200) * (H - 2 * pad);
+  const pts  = vals.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const last = vals[n - 1];
+  const stroke = last > 8 ? 'var(--green)' : last < -8 ? 'var(--red)' : 'var(--text-mid)';
+  const zeroY = y(0).toFixed(1);
+  return `<svg class="pulse-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    <line class="pulse-spark-zero" x1="0" y1="${zeroY}" x2="${W}" y2="${zeroY}"/>
+    <polyline points="${pts}" fill="none" stroke="${stroke}" stroke-width="1.4"
+              stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="${x(n-1).toFixed(1)}" cy="${y(last).toFixed(1)}" r="1.9" fill="${stroke}"/>
+  </svg>`;
+}
+
+function _pulseArrow(delta) {
+  if (delta === null || delta === undefined) return { ch: '▬', cls: 'flat', txt: '—' };
+  if (delta > 1.5)  return { ch: '▲', cls: 'up',   txt: `+${Math.round(delta)}` };
+  if (delta < -1.5) return { ch: '▼', cls: 'down', txt: `${Math.round(delta)}` };
+  return { ch: '▬', cls: 'flat', txt: '0' };
+}
+
+function _pulseMoverRow(m, polarity) {
+  const sign  = m.score >= 0 ? '+' : '';
+  const url   = (m.url || '#').replace(/"/g, '&quot;');
+  const title = (m.title || '').replace(/</g, '&lt;');
+  const badge = m.platform === 'stocktwits' ? 'ST'
+              : m.platform === 'lemmy'      ? 'LEMMY'
+              : m.src === 'news'            ? 'NEWS'
+              : m.src === 'macro'           ? 'MACRO'
+              : m.src === 'hn'              ? 'HN'
+              :                               (m.src || '').toUpperCase();
+  const star = m.tagged ? '<span class="pulse-mv-tag" title="explicit bull/bear self-tag">●</span>' : '';
+  const eng  = m.engagement
+    ? `· ${m.engagement >= 1000 ? (m.engagement / 1000).toFixed(1) + 'K' : m.engagement} ▲`
+    : '';
+  return `<a class="pulse-mv" href="${url}" target="_blank" rel="noopener">
+    <span class="pulse-mv-score ${polarity}">${sign}${m.score}</span>
+    <span class="pulse-mv-body">
+      <span class="pulse-mv-title">${title}</span>
+      <span class="pulse-mv-meta"><span class="pulse-bdg pulse-bdg-${m.platform || m.src}">${badge}</span>${star}<span class="pulse-mv-eng">${eng}</span></span>
+    </span>
+  </a>`;
+}
+
 async function fetchPulse() {
+  const body = document.getElementById('pulse-body');
   try {
-    const res  = await fetch('/api/sentiment', { cache: 'no-store' });
-    const data = await res.json();
-    if (!data.items || !data.items.length) throw new Error('No posts');
-
-    // Score every item.
-    // Reach weight differs by source:
-    //   reddit → log(upvotes+1) × upvote_ratio
-    //   news/macro/hn → fixed baseline (curated → all headlines weigh equally)
-    // Then multiply by per-item `src_weight` (set server-side per source).
-    data.items.forEach(it => {
-      const text  = it.title + ' ' + (it.selftext || '');
-      const { score, hits } = _pulseScoreText(text);
-      it.raw      = score;
-      it.hits     = hits;
-      it.compound = hits > 0 ? _pulseCompound(score) : 0;
-
-      let baseReach;
-      if (it.src === 'reddit') {
-        baseReach = Math.log(Math.max(2, it.score + 1)) * (it.upvote_ratio || 0.5);
-      } else if (it.src === 'hn') {
-        baseReach = Math.log(Math.max(2, it.score + 1)) * 0.6;
-      } else {
-        // news / macro headlines — no engagement metric, fixed reach
-        baseReach = 2.0;
-      }
-      it.reach    = baseReach * (it.src_weight || 1);
-      it.weighted = it.compound * it.reach;
-    });
-
-    const totalReach   = data.items.reduce((s, it) => s + it.reach,    0);
-    const weightedSum  = data.items.reduce((s, it) => s + it.weighted, 0);
-    const compound     = totalReach > 0 ? weightedSum / totalReach : 0;
-    const score100     = Math.round(compound * 100);
-
-    const bullishCount = data.items.filter(it => it.compound >  0.05).length;
-    const bearishCount = data.items.filter(it => it.compound < -0.05).length;
-    const neutralCount = data.items.length - bullishCount - bearishCount;
-
-    _renderPulse({
-      score100,
-      compound,
-      bullishCount, bearishCount, neutralCount,
-      total: data.items.length,
-      items: data.items,
-      generatedAt: data.generated_at,
-    });
+    const res = await fetch('/api/sentiment', { cache: 'no-store' });
+    const d   = await res.json();
+    if (!d.overall) throw new Error('bad payload');
+    _renderPulse(d);
   } catch (e) {
     console.warn('[MEEZUS] Pulse fetch failed:', e.message);
-    const lbl = document.getElementById('pulse-label');
-    if (lbl) lbl.textContent = 'Unavailable';
+    if (body) body.innerHTML = `<div class="pulse-loading">Pulse unavailable — is server.py running?</div>`;
   }
 }
 
-function _renderPulse({ score100, bullishCount, bearishCount, neutralCount, total, items, generatedAt }) {
-  // Big score
-  const scoreEl = document.getElementById('pulse-score');
-  if (scoreEl) {
-    const sign = score100 > 0 ? '+' : '';
-    scoreEl.textContent = `${sign}${score100}`;
-    scoreEl.className = 'pulse-score ' + (score100 > 10 ? 'pos' : score100 < -10 ? 'neg' : 'mid');
-  }
+function _renderPulse(d) {
+  const body = document.getElementById('pulse-body');
+  if (!body) return;
 
-  // Label + classification
-  const cls = _pulseClassify(score100);
-  const lblEl = document.getElementById('pulse-label');
-  if (lblEl) {
-    lblEl.textContent = cls.lbl;
-    lblEl.className   = 'pulse-label ' + cls.cls;
-  }
+  const o = d.overall;
+  const scoreCls = o.score > 8 ? 'pos' : o.score < -8 ? 'neg' : 'mid';
 
-  // Bar fill + needle
-  const fillEl   = document.getElementById('pulse-bar-fill');
-  const needleEl = document.getElementById('pulse-bar-needle');
-  if (fillEl && needleEl) {
-    const pct = (score100 + 100) / 2;   // 0..100 from -100..+100
-    needleEl.style.left = `${pct}%`;
-    if (score100 >= 0) {
-      fillEl.style.left  = '50%';
-      fillEl.style.width = `${pct - 50}%`;
-      fillEl.className   = 'pulse-bar-fill pos';
-    } else {
-      fillEl.style.left  = `${pct}%`;
-      fillEl.style.width = `${50 - pct}%`;
-      fillEl.className   = 'pulse-bar-fill neg';
-    }
-  }
+  const usingLast = d.delta && d.delta.last !== null && d.delta.last !== undefined;
+  const arrowVal  = d.delta ? (usingLast ? d.delta.last : d.delta.momentum) : null;
+  const arrow     = _pulseArrow(arrowVal);
+  const arrowCap  = usingLast ? 'vs last' : 'trend';
 
-  // Stats — polarity counts + source mix
-  const statsEl = document.getElementById('pulse-stats');
-  if (statsEl) {
-    const srcMix = {};
-    items.forEach(it => { srcMix[it.src] = (srcMix[it.src] || 0) + 1; });
-    const srcStr = Object.entries(srcMix)
-      .map(([s, n]) => `${n} ${s}`)
-      .join(' · ');
-    statsEl.innerHTML =
-      `<span class="pulse-stat-pos">${bullishCount} bull</span> · ` +
-      `<span class="pulse-stat-mid">${neutralCount} neutral</span> · ` +
-      `<span class="pulse-stat-neg">${bearishCount} bear</span>` +
-      `<br><span class="pulse-stat-sources">${srcStr}</span>`;
-  }
+  // master gauge geometry (-100..+100 → 0..100%)
+  const pct  = (o.score + 100) / 2;
+  const gPos = o.score >= 0;
+  const gStyle = gPos
+    ? `left:50%;width:${(pct - 50).toFixed(1)}%`
+    : `left:${pct.toFixed(1)}%;width:${(50 - pct).toFixed(1)}%`;
 
-  // Meta
-  const metaEl = document.getElementById('pulse-meta');
-  if (metaEl) {
-    metaEl.textContent = `${total} posts · ${_pulseTimeAgo(generatedAt)}`;
-  }
-
-  // Top bullish / bearish lists (sort by absolute compound × reach)
-  const ranked = [...items].sort((a, b) => Math.abs(b.weighted) - Math.abs(a.weighted));
-  const topBull = ranked.filter(it => it.compound > 0).slice(0, 4);
-  const topBear = ranked.filter(it => it.compound < 0).slice(0, 4);
-
-  const renderList = (list, polarity) => {
-    if (!list.length) return '<div class="pulse-item-empty">No clearly ' + polarity + ' posts.</div>';
-    return list.map(it => {
-      const score = Math.round(it.compound * 100);
-      const sign  = score >= 0 ? '+' : '';
-      const safeUrl = (it.permalink || '#').replace(/"/g, '&quot;');
-      const safeTitle = (it.title || '').replace(/</g, '&lt;');
-      const srcBadge = it.src === 'news'  ? 'NEWS'
-                     : it.src === 'macro' ? 'MACRO'
-                     : it.src === 'hn'    ? 'HN'
-                     :                      'REDDIT';
-      const engagement = it.src === 'reddit'
-        ? `${it.score >= 1000 ? (it.score/1000).toFixed(1) + 'K' : it.score} ↑`
-        : it.src === 'hn'
-        ? `${it.score >= 1000 ? (it.score/1000).toFixed(1) + 'K' : it.score} pts`
-        : '';
-      return `<a class="pulse-item" href="${safeUrl}" target="_blank" rel="noopener">
-        <span class="pulse-item-score ${polarity}">${sign}${score}</span>
-        <span class="pulse-item-title">${safeTitle}</span>
-        <span class="pulse-item-meta"><span class="pulse-src-${it.src}">${srcBadge}</span> · ${it.sub}${engagement ? ' · ' + engagement : ''}</span>
-      </a>`;
-    }).join('');
+  // center-anchored split bar for social / news
+  const splitBar = (v) => {
+    const p   = (v + 100) / 2;
+    const cls = v > 8 ? 'pos' : v < -8 ? 'neg' : 'mid';
+    const st  = v >= 0
+      ? `left:50%;width:${(p - 50).toFixed(1)}%`
+      : `left:${p.toFixed(1)}%;width:${(50 - p).toFixed(1)}%`;
+    return `<span class="pulse-sb-fill ${cls}" style="${st}"></span>`;
   };
+  const valCls = (v) => v > 8 ? 'pos' : v < -8 ? 'neg' : 'mid';
 
-  const bullList = document.getElementById('pulse-bull-list');
-  const bearList = document.getElementById('pulse-bear-list');
-  if (bullList) bullList.innerHTML = renderList(topBull, 'pos');
-  if (bearList) bearList.innerHTML = renderList(topBear, 'neg');
+  const topics = (d.topics || []).map(t => {
+    const cls = t.score > 8 ? 'pos' : t.score < -8 ? 'neg' : 'mid';
+    return `<span class="pulse-topic ${cls}">${t.name}<b>${_signed(t.score)}</b></span>`;
+  }).join('');
+
+  const dv      = d.divergence || {};
+  const dvState = dv.state || 'neutral';
+
+  body.innerHTML = `
+    <div class="pulse-col pulse-col-hero">
+      <div class="pulse-score-wrap">
+        <div class="pulse-score ${scoreCls}">${_signed(o.score)}</div>
+        <div class="pulse-score-side">
+          <div class="pulse-label pulse-${o.cls}">${o.label}</div>
+          <div class="pulse-arrow ${arrow.cls}"><span class="pulse-arrow-ch">${arrow.ch}</span> ${arrow.txt}<span class="pulse-arrow-cap">${arrowCap}</span></div>
+        </div>
+      </div>
+      <div class="pulse-gauge">
+        <div class="pulse-gauge-track">
+          <span class="pulse-gauge-zero"></span>
+          <span class="pulse-gauge-fill ${gPos ? 'pos' : 'neg'}" style="${gStyle}"></span>
+          <span class="pulse-gauge-needle" style="left:${pct.toFixed(1)}%"></span>
+        </div>
+        <div class="pulse-gauge-scale"><span class="neg">−100</span><span>0</span><span class="pos">+100</span></div>
+      </div>
+      <div class="pulse-conf">
+        <span class="pulse-conf-label">CONFIDENCE</span>
+        <span class="pulse-conf-track"><span class="pulse-conf-fill" style="width:${o.confidence}%"></span></span>
+        <span class="pulse-conf-val">${o.confidence}%</span>
+      </div>
+    </div>
+
+    <div class="pulse-col pulse-col-mid">
+      <div class="pulse-mid-head">
+        <span class="pulse-sec-label">14-DAY TREND</span>
+        <span class="pulse-mid-meta">${d.total} posts · ${_pulseTimeAgo(d.generated_at)}</span>
+      </div>
+      ${_pulseSparkline(d.history)}
+      <div class="pulse-split">
+        <div class="pulse-sb-row">
+          <span class="pulse-sb-name">SOCIAL <i>${d.social.count}</i></span>
+          <span class="pulse-sb-track"><span class="pulse-sb-mid"></span>${splitBar(d.social.score)}</span>
+          <span class="pulse-sb-val ${valCls(d.social.score)}">${_signed(d.social.score)}</span>
+        </div>
+        <div class="pulse-sb-row">
+          <span class="pulse-sb-name">NEWS <i>${d.news.count}</i></span>
+          <span class="pulse-sb-track"><span class="pulse-sb-mid"></span>${splitBar(d.news.score)}</span>
+          <span class="pulse-sb-val ${valCls(d.news.score)}">${_signed(d.news.score)}</span>
+        </div>
+      </div>
+      <div class="pulse-diverge pulse-dv-${dvState}">
+        <div class="pulse-dv-head"><span class="pulse-dv-dot"></span>${dv.label || '—'}</div>
+        <div class="pulse-dv-detail">${dv.detail || ''}</div>
+        <div class="pulse-dv-stats">BTC 24h <b>${_signed(dv.price24h)}%</b> · mood slope <b>${_signed(dv.sent)}</b></div>
+      </div>
+      <div class="pulse-topics">${topics || '<span class="pulse-topic mid">no clear topics</span>'}</div>
+    </div>
+
+    <div class="pulse-col pulse-col-movers">
+      <div class="pulse-mv-grp">
+        <div class="pulse-mv-head pos">▲ MOST BULLISH</div>
+        <div class="pulse-mv-list">${(d.movers && d.movers.bull || []).map(m => _pulseMoverRow(m, 'pos')).join('') || '<div class="pulse-mv-empty">no clearly bullish posts</div>'}</div>
+      </div>
+      <div class="pulse-mv-grp">
+        <div class="pulse-mv-head neg">▼ MOST BEARISH</div>
+        <div class="pulse-mv-list">${(d.movers && d.movers.bear || []).map(m => _pulseMoverRow(m, 'neg')).join('') || '<div class="pulse-mv-empty">no clearly bearish posts</div>'}</div>
+      </div>
+    </div>
+  `;
 }
 
 function initPulse() {
