@@ -750,16 +750,20 @@ def get_stream_url(video_id):
         '-g',
     ]
 
-    # Try strategies in order until one succeeds
+    # Try strategies in order until one succeeds. COOKIE strategies lead because
+    # authenticated requests bypass YouTube's "Sign in to confirm you're not a
+    # bot" challenge — the no-cookie player clients (tv_embedded/ios) get that
+    # challenge under any load and also intermittently return "No formats found".
+    # So cookies first, no-cookie clients only as last-ditch fallbacks.
     strategies = [
-        # 1. Safari cookies (needs Full Disk Access for Terminal in macOS Privacy settings)
-        ['--cookies-from-browser', 'safari'],
-        # 2. Chrome cookies fallback
+        # 1. Chrome cookies — authenticated, bypasses bot-detection (primary)
         ['--cookies-from-browser', 'chrome'],
-        # 3. iOS client — often bypasses bot detection without any cookies
-        ['--extractor-args', 'youtube:player_client=ios'],
-        # 4. TV embedded client
+        # 2. Safari cookies (works if Full Disk Access is granted; else fails fast)
+        ['--cookies-from-browser', 'safari'],
+        # 3. TV-embedded client — no-cookie fallback (works until bot-challenged)
         ['--extractor-args', 'youtube:player_client=tv_embedded'],
+        # 4. iOS client — last-ditch (often broken; kept in case it recovers)
+        ['--extractor-args', 'youtube:player_client=ios'],
     ]
 
     result   = None

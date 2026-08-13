@@ -711,13 +711,16 @@ async function initStream(asset) {
     data = await res.json();
   } catch (e) {
     if (msg) msg.textContent = 'Server offline — run: python3 server.py';
-    scheduleRetry(asset);
+    scheduleRetry(asset, _streamRetryDelay(asset, false));
     return;
   }
 
   if (data.error) {
-    if (msg) msg.textContent = data.error.slice(0, 80);
-    scheduleRetry(asset);
+    const botBlock = /sign in to confirm|not a bot|--cookies/i.test(data.error);
+    if (msg) msg.textContent = botBlock
+      ? 'YouTube rate-limit (anti-bot) — backing off, will retry'
+      : data.error.slice(0, 80);
+    scheduleRetry(asset, _streamRetryDelay(asset, botBlock));
     return;
   }
 
@@ -748,6 +751,7 @@ async function initStream(asset) {
     hls.attachMedia(video);
 
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      _streamFail[asset] = 0;   // recovered — reset backoff
       video.play().catch(() => {});
       if (overlay) overlay.style.display = 'none';
       if (dot) { dot.style.background = 'var(--green)'; dot.classList.add('blink'); }
@@ -762,8 +766,8 @@ async function initStream(asset) {
       if (dot) { dot.style.background = 'var(--red)'; dot.classList.remove('blink'); }
       hls.destroy();
       delete _hlsInstances[asset];
-      // Re-fetch the stream URL (it may have expired) after a short delay
-      scheduleRetry(asset, STREAM_RETRY_MS);
+      // Re-fetch the stream URL (it may have expired) with backoff
+      scheduleRetry(asset, _streamRetryDelay(asset, false));
     });
 
   } else if (data.type === 'mp4') {
@@ -772,6 +776,19 @@ async function initStream(asset) {
     if (overlay) overlay.style.display = 'none';
     if (dot) { dot.style.background = 'var(--green)'; dot.classList.add('blink'); }
   }
+}
+
+// Consecutive-failure counter per asset → exponential backoff. Critically, a
+// YouTube anti-bot block ("Sign in to confirm you're not a bot") is an IP-level
+// throttle that only clears if we STOP hitting YouTube — retrying every 20s
+// perpetuates it. So bot-blocks back off hard (up to 15 min); normal errors up
+// to 5 min. Reset to 0 on a successful MANIFEST_PARSED.
+const _streamFail = {};
+function _streamRetryDelay(asset, botBlock) {
+  const n = (_streamFail[asset] = (_streamFail[asset] || 0) + 1);
+  return botBlock
+    ? Math.min(15 * 60_000, 90_000 * n)                      // 1.5m, 3m, 4.5m … cap 15m
+    : Math.min(5 * 60_000, STREAM_RETRY_MS * Math.pow(1.7, n - 1)); // 20s, 34s … cap 5m
 }
 
 function scheduleRetry(asset, delay = STREAM_RETRY_MS) {
